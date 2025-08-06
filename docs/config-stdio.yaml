@@ -1,0 +1,42 @@
+# MCP Server Configuration - Stdio Mode
+server:
+  name: "Kubernetes MCP"
+  version: "0.1.0"
+  transport:
+    type: "stdio"
+
+# Middleware Configuration
+middleware:
+  access_logs:
+    excluded_headers: []
+    redacted_headers: []
+
+  jwt:
+    enabled: false
+
+# Kubernetes Configuration
+kubernetes:
+  default_context: "default"
+  contexts:
+    default:
+      kubeconfig: ""  # Uses ~/.kube/config
+      description: "Local Kubernetes cluster"
+      allowed_namespaces: []
+      denied_namespaces: []
+
+  tools:
+    bulk_operations:
+      max_resources_per_operation: 100
+
+# Authorization Configuration - Allow all for local usage
+authorization:
+  allow_anonymous: true
+  identity_claim: ""
+  policies:
+    - name: "allow-all"
+      description: "Allow all tools for local usage"
+      match:
+        expression: "true"
+      allow:
+        tools: ["*"]
+        contexts: ["*"]
