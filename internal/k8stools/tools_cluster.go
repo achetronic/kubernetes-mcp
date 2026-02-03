@@ -44,8 +44,11 @@ func (m *Manager) handleListAPIResources(ctx context.Context, request mcp.CallTo
 	apiGroup, _ := args["api_group"].(string)
 	namespacedFilter, hasNamespacedFilter := args["namespaced"].(bool)
 
-	// Check authorization
-	if err := m.checkAuthorization(request, "list_api_resources", k8sContext, "", authorization.ResourceInfo{}); err != nil {
+	// Check authorization (virtual resource: _/APIDiscovery)
+	if err := m.checkAuthorization(request, "list_api_resources", k8sContext, "", authorization.ResourceInfo{
+		Group: authorization.VirtualResourceGroup,
+		Kind:  authorization.VirtualKindAPIDiscovery,
+	}); err != nil {
 		return errorResult(err), nil
 	}
 
@@ -138,8 +141,11 @@ func (m *Manager) handleListAPIVersions(ctx context.Context, request mcp.CallToo
 
 	k8sContext := m.getContextParam(args)
 
-	// Check authorization
-	if err := m.checkAuthorization(request, "list_api_versions", k8sContext, "", authorization.ResourceInfo{}); err != nil {
+	// Check authorization (virtual resource: _/APIDiscovery)
+	if err := m.checkAuthorization(request, "list_api_versions", k8sContext, "", authorization.ResourceInfo{
+		Group: authorization.VirtualResourceGroup,
+		Kind:  authorization.VirtualKindAPIDiscovery,
+	}); err != nil {
 		return errorResult(err), nil
 	}
 
@@ -180,8 +186,11 @@ func (m *Manager) handleGetClusterInfo(ctx context.Context, request mcp.CallTool
 
 	k8sContext := m.getContextParam(args)
 
-	// Check authorization
-	if err := m.checkAuthorization(request, "get_cluster_info", k8sContext, "", authorization.ResourceInfo{}); err != nil {
+	// Check authorization (virtual resource: _/ClusterInfo)
+	if err := m.checkAuthorization(request, "get_cluster_info", k8sContext, "", authorization.ResourceInfo{
+		Group: authorization.VirtualResourceGroup,
+		Kind:  authorization.VirtualKindClusterInfo,
+	}); err != nil {
 		return errorResult(err), nil
 	}
 
@@ -247,9 +256,11 @@ func (m *Manager) handleListNamespaces(ctx context.Context, request mcp.CallTool
 	k8sContext := m.getContextParam(args)
 	labelSelector, _ := args["label_selector"].(string)
 
-	// Check authorization
+	// Check authorization (real K8s resource: Namespace)
 	if err := m.checkAuthorization(request, "list_namespaces", k8sContext, "", authorization.ResourceInfo{
-		Kind: "Namespace",
+		Group:   "",
+		Version: "v1",
+		Kind:    "Namespace",
 	}); err != nil {
 		return errorResult(err), nil
 	}

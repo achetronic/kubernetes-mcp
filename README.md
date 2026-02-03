@@ -1,14 +1,18 @@
-# Kubernetes MCP
+<p align="center">
+  <img src="docs/images/header.svg" alt="Kubernetes MCP" width="700">
+</p>
 
-![GitHub go.mod Go version](https://img.shields.io/github/go-mod/go-version/achetronic/kubernetes-mcp)
-![GitHub](https://img.shields.io/github/license/achetronic/kubernetes-mcp)
-![Docker Pulls](https://img.shields.io/docker/pulls/achetronic/kubernetes-mcp)
+<p align="center">
+  <img src="https://img.shields.io/github/go-mod/go-version/achetronic/kubernetes-mcp" alt="Go version">
+  <img src="https://img.shields.io/github/license/achetronic/kubernetes-mcp" alt="License">
+  <img src="https://img.shields.io/docker/pulls/achetronic/kubernetes-mcp" alt="Docker Pulls">
+</p>
 
-![YouTube Channel Subscribers](https://img.shields.io/youtube/channel/subscribers/UCeSb3yfsPNNVr13YsYNvCAw?label=achetronic&link=http%3A%2F%2Fyoutube.com%2Fachetronic)
-![GitHub followers](https://img.shields.io/github/followers/achetronic?label=achetronic&link=http%3A%2F%2Fgithub.com%2Fachetronic)
-![X (formerly Twitter) Follow](https://img.shields.io/twitter/follow/achetronic?style=flat&logo=twitter&link=https%3A%2F%2Ftwitter.com%2Fachetronic)
-
-An MCP server that connects AI assistants like Claude to your Kubernetes clusters. Includes **yq filtering** to save your context window, **CEL-based RBAC** for fine-grained access control, **multi-cluster support**, and **optional OAuth 2.1** for exposing it to public internet safely.
+<p align="center">
+  <a href="http://youtube.com/achetronic"><img src="https://img.shields.io/youtube/channel/subscribers/UCeSb3yfsPNNVr13YsYNvCAw?label=achetronic" alt="YouTube"></a>
+  <a href="http://github.com/achetronic"><img src="https://img.shields.io/github/followers/achetronic?label=achetronic" alt="GitHub followers"></a>
+  <a href="https://twitter.com/achetronic"><img src="https://img.shields.io/twitter/follow/achetronic?style=flat&logo=twitter" alt="Twitter"></a>
+</p>
 
 ## Why Kubernetes MCP?
 
@@ -58,7 +62,7 @@ Behind the scenes, the AI chains multiple yq expressions to filter and transform
 <details>
 <summary><strong>🔐 Advanced RBAC with CEL</strong></summary>
 
-Fine-grained access control using familiar CEL expressions:
+Fine-grained access control using CEL expressions — filter by **tools**, **contexts**, **API groups**, **kinds**, **namespaces**, and **resource names**:
 
 ```yaml
 authorization:
@@ -70,16 +74,27 @@ authorization:
       allow:
         tools: ["*"]
         contexts: ["*"]
+        resources:
+          - groups: ["*"]
+            kinds: ["*"]
 
-    # Developers: read-only in production
-    - name: "developers-prod"
+    # Developers: read-only, no secrets, only their namespaces
+    - name: "developers-limited"
       match:
         expression: 'payload.groups.exists(g, g == "developers")'
       allow:
         tools: ["get_*", "list_*", "describe_*"]
-        contexts: ["production"]
+        contexts: ["*"]
+        resources:
+          - groups: ["", "apps", "networking.k8s.io"]
+            kinds: ["*"]
+            namespaces: ["team-*"]
       deny:
-        tools: ["delete_*", "exec_command"]
+        resources:
+          - groups: [""]
+            kinds: ["Secret"]
+          - groups: ["rbac.authorization.k8s.io"]
+            kinds: ["*"]
 ```
 
 </details>
@@ -380,10 +395,170 @@ kubernetes:
 2. Find **all** policies whose `match` expression is true
 3. For each policy: `effective = allow - deny`
 4. Final result: **union** of all effective permissions
-5. If result allows `tool + context` → **allow**
+5. If result allows `tool + context + resource` → **allow**
 6. Default: **deny**
 
 **Most permissive wins**: If a user matches multiple policies, they get the union of all permissions.
+
+### Resource-Level Authorization
+
+Control access by **API group**, **kind**, **namespace**, and **name**.
+
+#### Reference
+
+| Field | Example | Behavior when omitted |
+|-------|---------|----------------------|
+| `groups` | `[""]` (core), `["apps"]`, `["_"]` (virtual) | Any group |
+| `versions` | `["v1"]`, `["v1beta1"]` | Any version |
+| `kinds` | `["Pod", "Secret"]` | Any kind |
+| `namespaces` | `["default"]`, `["team-*"]`, `[""]` (cluster-scoped) | Any namespace + cluster-scoped |
+| `names` | `["myapp-*"]`, `["*-config"]` | Any name |
+
+> **Tip**: Omit `versions` unless you need to target a specific API version. Omitting it matches all versions.
+
+#### Wildcards
+
+| Pattern | Meaning |
+|---------|---------|
+| `*` | Match all |
+| `prefix-*` | Starts with |
+| `*-suffix` | Ends with |
+
+#### Example: Allow everything except sensitive resources
+
+```yaml
+- name: "all-except-sensitive"
+  match:
+    expression: "true"
+  allow:
+    tools: ["*"]
+    contexts: ["*"]
+    resources:
+      - groups: ["*"]
+        kinds: ["*"]
+      - groups: ["_"]
+        kinds: ["*"]
+  deny:
+    resources:
+      # Secrets
+      - groups: [""]
+        kinds: ["Secret"]
+      # RBAC
+      - groups: ["rbac.authorization.k8s.io"]
+        kinds: ["*"]
+      # Certificates
+      - groups: ["certificates.k8s.io"]
+        kinds: ["*"]
+      # System namespaces
+      - groups: ["*"]
+        kinds: ["*"]
+        namespaces: ["kube-system", "kube-public"]
+```
+
+#### Example: Block Secrets
+
+```yaml
+- name: "no-secrets"
+  match:
+    expression: "true"
+  allow:
+    tools: ["*"]
+    contexts: ["*"]
+    resources:
+      - groups: ["*"]
+        kinds: ["*"]
+  deny:
+    resources:
+      - groups: [""]
+        kinds: ["Secret"]
+```
+
+#### Example: Read-only, no sensitive resources
+
+```yaml
+- name: "read-only-safe"
+  match:
+    expression: '"developers" in payload.groups'
+  allow:
+    tools: ["get_resource", "list_resources", "describe_resource", "get_logs"]
+    contexts: ["*"]
+    resources:
+      - groups: ["", "apps", "batch", "networking.k8s.io"]
+        kinds: ["*"]
+  deny:
+    resources:
+      - groups: [""]
+        kinds: ["Secret"]
+      - groups: ["rbac.authorization.k8s.io"]
+        kinds: ["*"]
+```
+
+#### Example: Write only in team namespaces
+
+```yaml
+- name: "write-own-namespaces"
+  match:
+    expression: '"developers" in payload.groups'
+  allow:
+    tools: ["apply_manifest", "patch_resource", "delete_resource"]
+    contexts: ["staging"]
+    resources:
+      - groups: ["", "apps"]
+        kinds: ["*"]
+        namespaces: ["team-*"]
+  deny:
+    resources:
+      - groups: [""]
+        kinds: ["Secret"]
+```
+
+#### Example: CI/CD service account
+
+```yaml
+- name: "cicd-deploy"
+  match:
+    expression: 'payload.client_id == "ci-cd-service"'
+  allow:
+    tools: ["apply_manifest", "diff_manifest", "get_resource"]
+    contexts: ["production"]
+    resources:
+      - groups: ["", "apps"]
+        kinds: ["Deployment", "Service", "ConfigMap"]
+        namespaces: ["app-*"]
+```
+
+#### Example: Full admin access
+
+```yaml
+- name: "sre-full-access"
+  match:
+    expression: '"sre" in payload.groups'
+  allow:
+    tools: ["*"]
+    contexts: ["*"]
+    resources:
+      - groups: ["*"]
+        kinds: ["*"]
+      - groups: ["_"]  # Virtual MCP resources
+        kinds: ["*"]
+```
+
+#### Virtual MCP Resources
+
+Tools that don't operate on K8s resources use virtual resources under group `_`:
+
+| Tools | Kind |
+|-------|------|
+| `list_api_resources`, `list_api_versions` | `APIDiscovery` |
+| `get_cluster_info` | `ClusterInfo` |
+| `get_current_context`, `list_contexts`, `switch_context` | `Context` |
+
+```yaml
+# Allow discovery and context switching
+resources:
+  - groups: ["_"]
+    kinds: ["APIDiscovery", "ClusterInfo", "Context"]
+```
 
 ---
 

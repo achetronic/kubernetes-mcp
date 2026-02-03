@@ -84,3 +84,10 @@ authorization:
       allow:
         tools: ["*"]
         contexts: ["*"]
+        resources:
+          # All real K8s resources
+          - groups: ["*"]
+            kinds: ["*"]
+          # All virtual MCP resources (discovery, context, cluster info)
+          - groups: ["_"]
+            kinds: ["*"]

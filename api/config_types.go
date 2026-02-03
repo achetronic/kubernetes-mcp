@@ -133,12 +133,37 @@ type MatchConfig struct {
 	Expression string `yaml:"expression"`
 }
 
-// ToolContextRule represents allowed/denied tools, contexts, and prefixes
+// ResourceRule represents a rule for filtering resources by GVK + namespace + name
+type ResourceRule struct {
+	// Groups filters by API group
+	// - [""] = Core API only
+	// - ["_"] = Virtual MCP resources only
+	// - ["*"] or omit = any group
+	Groups []string `yaml:"groups,omitempty"`
+
+	// Versions filters by API version (["*"] = all, omit = all)
+	Versions []string `yaml:"versions,omitempty"`
+
+	// Kinds filters by resource kind (["*"] = all, omit = all)
+	Kinds []string `yaml:"kinds,omitempty"`
+
+	// Namespaces filters by namespace (supports "prefix-*" wildcards)
+	// - omit = any namespace + cluster-scoped
+	// - ["*"] = any namespaced resource only
+	// - [""] = cluster-scoped only
+	Namespaces []string `yaml:"namespaces,omitempty"`
+
+	// Names filters by resource name (supports "prefix-*" wildcards)
+	Names []string `yaml:"names,omitempty"`
+}
+
+// ToolContextRule represents allowed/denied tools, contexts, resources, and prefixes
 type ToolContextRule struct {
-	Tools              []string `yaml:"tools,omitempty"`
-	Contexts           []string `yaml:"contexts,omitempty"`
-	LabelPrefixes      []string `yaml:"label_prefixes,omitempty"`
-	AnnotationPrefixes []string `yaml:"annotation_prefixes,omitempty"`
+	Tools              []string       `yaml:"tools,omitempty"`
+	Contexts           []string       `yaml:"contexts,omitempty"`
+	Resources          []ResourceRule `yaml:"resources,omitempty"`
+	LabelPrefixes      []string       `yaml:"label_prefixes,omitempty"`
+	AnnotationPrefixes []string       `yaml:"annotation_prefixes,omitempty"`
 }
 
 // AuthorizationPolicy represents an authorization policy
