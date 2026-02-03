@@ -60,9 +60,9 @@ Behind the scenes, the AI chains multiple yq expressions to filter and transform
 </details>
 
 <details>
-<summary><strong>🔐 Advanced RBAC with CEL</strong></summary>
+<summary><strong>🔐 Advanced RBAC</strong></summary>
 
-Fine-grained access control using CEL expressions — filter by **tools**, **contexts**, **API groups**, **kinds**, **namespaces**, and **resource names**:
+Fine-grained access control — filter by **tools**, **contexts**, **API groups**, **kinds**, **namespaces**, and **resource names**:
 
 ```yaml
 authorization:
@@ -634,7 +634,7 @@ kubernetes-mcp/
 │   │   ├── tools_rbac_metrics.go  # permissions, metrics
 │   │   └── tools_diff.go          # manifest diff
 │   ├── kubernetes/client.go       # Multi-cluster client manager
-│   ├── authorization/evaluator.go # CEL-based RBAC
+│   ├── authorization/evaluator.go # RBAC evaluator
 │   ├── yqutil/evaluator.go        # yq expression processor
 │   ├── middlewares/               # JWT, logging middlewares
 │   └── handlers/                  # OAuth endpoints
