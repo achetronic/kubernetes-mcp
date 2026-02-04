@@ -104,6 +104,7 @@ type OAuthProtectedResourceConfig struct {
 
 // KubernetesContextConfig represents the configuration for a k8s context
 type KubernetesContextConfig struct {
+	Name              string   `yaml:"name"`
 	Kubeconfig        string   `yaml:"kubeconfig,omitempty"`
 	KubeconfigContext string   `yaml:"kubeconfig_context,omitempty"`
 	Description       string   `yaml:"description,omitempty"`
@@ -123,9 +124,10 @@ type KubernetesToolsConfig struct {
 
 // KubernetesConfig represents the Kubernetes configuration
 type KubernetesConfig struct {
-	DefaultContext string                             `yaml:"default_context"`
-	Contexts       map[string]KubernetesContextConfig `yaml:"contexts"`
-	Tools          KubernetesToolsConfig              `yaml:"tools,omitempty"`
+	DefaultContext string                    `yaml:"default_context"`
+	Contexts       []KubernetesContextConfig `yaml:"contexts,omitempty"`
+	ContextsDir    string                    `yaml:"contexts_dir,omitempty"`
+	Tools          KubernetesToolsConfig     `yaml:"tools,omitempty"`
 }
 
 // MatchConfig represents a match condition for authorization

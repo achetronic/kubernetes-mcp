@@ -68,9 +68,9 @@ kubernetes:
   # Default context when not specified
   default_context: "production"
   
-  # Available contexts (clusters)
+  # Available contexts (clusters) - list format with explicit names
   contexts:
-    production:
+    - name: "production"
       # Kubeconfig for this context
       kubeconfig: "/etc/kubernetes/production.kubeconfig"
       # Or use a context from a shared kubeconfig
@@ -88,17 +88,21 @@ kubernetes:
         - kube-public
         - istio-system
       
-    staging:
+    - name: "staging"
       kubeconfig: "/etc/kubernetes/staging.kubeconfig"
       description: "Staging cluster - safe for testing"
       allowed_namespaces: []
       denied_namespaces: []
       
-    development:
+    - name: "development"
       kubeconfig: "/etc/kubernetes/dev.kubeconfig"
       description: "Development cluster - free to experiment"
       allowed_namespaces: []
       denied_namespaces: []
+
+  # Auto-load kubeconfigs from directory (context name = current-context of each file)
+  # Kubeconfig files are watched for changes and clients are reloaded automatically
+  # contexts_dir: "/etc/kubernetes/clusters/"
 
   # Global tools configuration
   tools:

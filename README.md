@@ -108,19 +108,24 @@ Manage multiple clusters with independent configurations:
 kubernetes:
   default_context: "staging"
   contexts:
-    production:
+    - name: "production"
       kubeconfig: "/etc/kubernetes/prod.kubeconfig"
       description: "Production - handle with care"
       denied_namespaces: ["kube-system", "istio-system"]
 
-    staging:
+    - name: "staging"
       kubeconfig: "/etc/kubernetes/staging.kubeconfig"
       description: "Staging - safe for testing"
 
-    development:
+    - name: "development"
       kubeconfig: "/etc/kubernetes/dev.kubeconfig"
       description: "Development - experiment freely"
+
+  # Or auto-load from directory (context name = current-context of each file)
+  contexts_dir: "/etc/kubernetes/clusters/"
 ```
+
+**Hot-reload**: Kubeconfig files are watched for changes. When a sidecar or external process updates a kubeconfig, the client is automatically reloaded — no restart required.
 
 </details>
 
@@ -170,7 +175,7 @@ middleware:
 kubernetes:
   default_context: "default"
   contexts:
-    default:
+    - name: "default"
       kubeconfig: "" # Uses ~/.kube/config
       description: "Local cluster"
 
@@ -225,7 +230,7 @@ middleware:
 kubernetes:
   default_context: "default"
   contexts:
-    default:
+    - name: "default"
       kubeconfig: "/root/.kube/config"
       description: "My Kubernetes cluster"
 
@@ -328,9 +333,12 @@ oauth_protected_resource:
 # Kubernetes Configuration
 kubernetes:
   default_context: "production"
+  
+  # Explicit contexts with custom names
   contexts:
-    production:
+    - name: "production"
       kubeconfig: "/etc/kubernetes/prod.kubeconfig"
+      kubeconfig_context: "gke_myproject_prod"  # Optional: use specific context from kubeconfig
       description: "Production cluster"
       allowed_namespaces: [] # Empty = all allowed
       denied_namespaces:
@@ -338,9 +346,12 @@ kubernetes:
         - kube-public
         - istio-system
 
-    staging:
+    - name: "staging"
       kubeconfig: "/etc/kubernetes/staging.kubeconfig"
       description: "Staging cluster"
+
+  # Auto-load kubeconfigs from directory (context name = current-context of each file)
+  # contexts_dir: "/etc/kubernetes/clusters/"
 
   tools:
     bulk_operations:

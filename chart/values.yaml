@@ -143,9 +143,11 @@ configMaps:
         kubernetes:
           default_context: "default"
           contexts:
-            default:
+            - name: "default"
               # Path to kubeconfig file (empty uses in-cluster config or ~/.kube/config)
               kubeconfig: ""
+              # Optional: use specific context from kubeconfig file
+              # kubeconfig_context: "gke_myproject_prod"
               description: "Default Kubernetes cluster"
               # Namespace restrictions (empty lists = no restrictions)
               allowed_namespaces: []
@@ -153,6 +155,10 @@ configMaps:
                 - kube-system
                 - kube-public
         
+          # Auto-load kubeconfigs from directory (context name = current-context of each file)
+          # Kubeconfig files are watched for changes and clients are reloaded automatically
+          # contexts_dir: "/etc/kubernetes/clusters/"
+
           tools:
             bulk_operations:
               max_resources_per_operation: 100

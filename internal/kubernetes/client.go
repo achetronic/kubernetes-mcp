@@ -18,12 +18,16 @@ package kubernetes
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"time"
 
 	"kubernetes-mcp/api"
 
+	"github.com/fsnotify/fsnotify"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -42,29 +46,225 @@ type Client struct {
 // ClientManager manages multiple kubernetes clients for different contexts
 type ClientManager struct {
 	config         *api.KubernetesConfig
+	contextsByName map[string]api.KubernetesContextConfig
 	clients        map[string]*Client
 	mutex          sync.RWMutex
 	currentContext string
+
+	// File watching
+	watcher        *fsnotify.Watcher
+	fileToContexts map[string][]string // kubeconfig path -> context names
+	stopChan       chan struct{}
 }
 
 // NewClientManager creates a new ClientManager
 func NewClientManager(config *api.KubernetesConfig) (*ClientManager, error) {
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create file watcher: %w", err)
+	}
+
 	cm := &ClientManager{
 		config:         config,
+		contextsByName: make(map[string]api.KubernetesContextConfig),
 		clients:        make(map[string]*Client),
 		currentContext: config.DefaultContext,
+		watcher:        watcher,
+		fileToContexts: make(map[string][]string),
+		stopChan:       make(chan struct{}),
 	}
 
-	// Initialize clients for all configured contexts
-	for name, ctxConfig := range config.Contexts {
-		client, err := cm.createClient(name, ctxConfig)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create client for context %s: %w", name, err)
+	// Initialize clients for explicit contexts
+	for _, ctxConfig := range config.Contexts {
+		if _, exists := cm.contextsByName[ctxConfig.Name]; exists {
+			return nil, fmt.Errorf("duplicate context name %q in explicit contexts", ctxConfig.Name)
 		}
-		cm.clients[name] = client
+		client, err := cm.createClient(ctxConfig.Name, ctxConfig)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create client for context %s: %w", ctxConfig.Name, err)
+		}
+		cm.clients[ctxConfig.Name] = client
+		cm.contextsByName[ctxConfig.Name] = ctxConfig
+
+		// Track file for watching
+		if ctxConfig.Kubeconfig != "" {
+			cm.trackFile(ctxConfig.Kubeconfig, ctxConfig.Name)
+		}
 	}
+
+	// Load contexts from directory if specified
+	if config.ContextsDir != "" {
+		if err := cm.loadContextsFromDir(config.ContextsDir); err != nil {
+			return nil, fmt.Errorf("failed to load contexts from directory %s: %w", config.ContextsDir, err)
+		}
+	}
+
+	// Start watching for file changes
+	go cm.watchFiles()
 
 	return cm, nil
+}
+
+// loadContextsFromDir loads kubeconfig files from a directory
+func (cm *ClientManager) loadContextsFromDir(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("failed to read directory: %w", err)
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".yaml") && !strings.HasSuffix(name, ".yml") {
+			continue
+		}
+
+		kubeconfigPath := filepath.Join(dir, name)
+
+		// Load kubeconfig to extract current-context
+		kubeconfig, err := clientcmd.LoadFromFile(kubeconfigPath)
+		if err != nil {
+			return fmt.Errorf("failed to load kubeconfig %s: %w", kubeconfigPath, err)
+		}
+
+		contextName := kubeconfig.CurrentContext
+		if contextName == "" {
+			return fmt.Errorf("kubeconfig %s has no current-context set", kubeconfigPath)
+		}
+
+		// Check for collision
+		if existing, exists := cm.contextsByName[contextName]; exists {
+			return fmt.Errorf("context name collision: %q already defined (from %s), found again in %s",
+				contextName, existing.Kubeconfig, kubeconfigPath)
+		}
+
+		ctxConfig := api.KubernetesContextConfig{
+			Name:       contextName,
+			Kubeconfig: kubeconfigPath,
+		}
+
+		client, err := cm.createClient(contextName, ctxConfig)
+		if err != nil {
+			return fmt.Errorf("failed to create client for context %s from %s: %w", contextName, kubeconfigPath, err)
+		}
+
+		cm.clients[contextName] = client
+		cm.contextsByName[contextName] = ctxConfig
+
+		// Track file for watching
+		cm.trackFile(kubeconfigPath, contextName)
+	}
+
+	return nil
+}
+
+// trackFile adds a kubeconfig file to the watcher
+func (cm *ClientManager) trackFile(path string, contextName string) {
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		log.Printf("Warning: failed to get absolute path for %s: %v", path, err)
+		absPath = path
+	}
+
+	cm.fileToContexts[absPath] = append(cm.fileToContexts[absPath], contextName)
+
+	if err := cm.watcher.Add(absPath); err != nil {
+		log.Printf("Warning: failed to watch kubeconfig %s: %v", absPath, err)
+	}
+}
+
+// watchFiles watches for kubeconfig file changes and reloads clients
+func (cm *ClientManager) watchFiles() {
+	// Debounce timer to avoid multiple reloads for rapid changes
+	var debounceTimer *time.Timer
+	pendingFiles := make(map[string]struct{})
+	var pendingMu sync.Mutex
+
+	for {
+		select {
+		case <-cm.stopChan:
+			return
+
+		case event, ok := <-cm.watcher.Events:
+			if !ok {
+				return
+			}
+
+			// Only handle write and create events
+			if event.Op&(fsnotify.Write|fsnotify.Create) == 0 {
+				continue
+			}
+
+			absPath, _ := filepath.Abs(event.Name)
+
+			pendingMu.Lock()
+			pendingFiles[absPath] = struct{}{}
+
+			// Debounce: wait 500ms before reloading
+			if debounceTimer != nil {
+				debounceTimer.Stop()
+			}
+			debounceTimer = time.AfterFunc(500*time.Millisecond, func() {
+				pendingMu.Lock()
+				filesToReload := make([]string, 0, len(pendingFiles))
+				for f := range pendingFiles {
+					filesToReload = append(filesToReload, f)
+				}
+				pendingFiles = make(map[string]struct{})
+				pendingMu.Unlock()
+
+				for _, filePath := range filesToReload {
+					cm.reloadContextsForFile(filePath)
+				}
+			})
+			pendingMu.Unlock()
+
+		case err, ok := <-cm.watcher.Errors:
+			if !ok {
+				return
+			}
+			log.Printf("Watcher error: %v", err)
+		}
+	}
+}
+
+// reloadContextsForFile reloads all contexts that use the given kubeconfig file
+func (cm *ClientManager) reloadContextsForFile(filePath string) {
+	cm.mutex.Lock()
+	defer cm.mutex.Unlock()
+
+	contextNames, ok := cm.fileToContexts[filePath]
+	if !ok {
+		return
+	}
+
+	for _, contextName := range contextNames {
+		ctxConfig, exists := cm.contextsByName[contextName]
+		if !exists {
+			continue
+		}
+
+		log.Printf("Reloading client for context %q due to kubeconfig change", contextName)
+
+		client, err := cm.createClient(contextName, ctxConfig)
+		if err != nil {
+			log.Printf("Error reloading client for context %s: %v", contextName, err)
+			continue
+		}
+
+		cm.clients[contextName] = client
+	}
+}
+
+// Stop stops the file watcher and cleans up resources
+func (cm *ClientManager) Stop() {
+	close(cm.stopChan)
+	if cm.watcher != nil {
+		cm.watcher.Close()
+	}
 }
 
 // createClient creates a kubernetes client for a given context configuration
@@ -183,7 +383,7 @@ func (cm *ClientManager) GetContextConfig(context string) (api.KubernetesContext
 	if context == "" {
 		context = cm.currentContext
 	}
-	config, ok := cm.config.Contexts[context]
+	config, ok := cm.contextsByName[context]
 	return config, ok
 }
 

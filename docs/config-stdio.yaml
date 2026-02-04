@@ -18,11 +18,14 @@ middleware:
 kubernetes:
   default_context: "default"
   contexts:
-    default:
+    - name: "default"
       kubeconfig: ""  # Uses ~/.kube/config
       description: "Local Kubernetes cluster"
       allowed_namespaces: []
       denied_namespaces: []
+
+  # Auto-load kubeconfigs from directory (context name = current-context of each file)
+  # contexts_dir: "/shared/kubeconfigs/"
 
   tools:
     bulk_operations:
