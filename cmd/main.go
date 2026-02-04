@@ -66,7 +66,7 @@ func main() {
 	// 4. Initialize Kubernetes client manager
 	var clientManager *kubernetes.ClientManager
 	if len(appCtx.Config.Kubernetes.Contexts) > 0 || appCtx.Config.Kubernetes.ContextsDir != "" {
-		clientManager, err = kubernetes.NewClientManager(&appCtx.Config.Kubernetes)
+		clientManager, err = kubernetes.NewClientManager(appCtx.Logger, &appCtx.Config.Kubernetes)
 		if err != nil {
 			appCtx.Logger.Error("failed creating Kubernetes client manager", "error", err.Error())
 			// Continue without Kubernetes - tools will fail gracefully

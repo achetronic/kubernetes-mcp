@@ -18,7 +18,7 @@ package kubernetes
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -45,6 +45,7 @@ type Client struct {
 
 // ClientManager manages multiple kubernetes clients for different contexts
 type ClientManager struct {
+	logger         *slog.Logger
 	config         *api.KubernetesConfig
 	contextsByName map[string]api.KubernetesContextConfig
 	clients        map[string]*Client
@@ -58,13 +59,14 @@ type ClientManager struct {
 }
 
 // NewClientManager creates a new ClientManager
-func NewClientManager(config *api.KubernetesConfig) (*ClientManager, error) {
+func NewClientManager(logger *slog.Logger, config *api.KubernetesConfig) (*ClientManager, error) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create file watcher: %w", err)
 	}
 
 	cm := &ClientManager{
+		logger:         logger,
 		config:         config,
 		contextsByName: make(map[string]api.KubernetesContextConfig),
 		clients:        make(map[string]*Client),
@@ -86,9 +88,15 @@ func NewClientManager(config *api.KubernetesConfig) (*ClientManager, error) {
 		cm.clients[ctxConfig.Name] = client
 		cm.contextsByName[ctxConfig.Name] = ctxConfig
 
-		// Track file for watching
-		if ctxConfig.Kubeconfig != "" {
-			cm.trackFile(ctxConfig.Kubeconfig, ctxConfig.Name)
+		// Track file for watching (resolve default path if empty)
+		kubeconfigPath := ctxConfig.Kubeconfig
+		if kubeconfigPath == "" {
+			if home := os.Getenv("HOME"); home != "" {
+				kubeconfigPath = filepath.Join(home, ".kube", "config")
+			}
+		}
+		if kubeconfigPath != "" {
+			cm.trackFile(kubeconfigPath, ctxConfig.Name)
 		}
 	}
 
@@ -165,7 +173,7 @@ func (cm *ClientManager) loadContextsFromDir(dir string) error {
 func (cm *ClientManager) trackFile(path string, contextName string) {
 	absPath, err := filepath.Abs(path)
 	if err != nil {
-		log.Printf("Warning: failed to get absolute path for %s: %v", path, err)
+		cm.logger.Warn("failed to get absolute path for kubeconfig", "path", path, "error", err)
 		absPath = path
 	}
 
@@ -175,7 +183,7 @@ func (cm *ClientManager) trackFile(path string, contextName string) {
 	// This is more robust for atomic writes (temp file + rename)
 	dir := filepath.Dir(absPath)
 	if err := cm.watcher.Add(dir); err != nil {
-		log.Printf("Warning: failed to watch directory %s for kubeconfig %s: %v", dir, absPath, err)
+		cm.logger.Warn("failed to watch directory for kubeconfig", "directory", dir, "kubeconfig", absPath, "error", err)
 	}
 }
 
@@ -238,7 +246,7 @@ func (cm *ClientManager) watchFiles() {
 			if !ok {
 				return
 			}
-			log.Printf("Watcher error: %v", err)
+			cm.logger.Error("kubeconfig watcher error", "error", err)
 		}
 	}
 }
@@ -259,11 +267,11 @@ func (cm *ClientManager) reloadContextsForFile(filePath string) {
 			continue
 		}
 
-		log.Printf("Reloading client for context %q due to kubeconfig change", contextName)
+		cm.logger.Info("reloading kubernetes client due to kubeconfig change", "context", contextName, "kubeconfig", filePath)
 
 		client, err := cm.createClient(contextName, ctxConfig)
 		if err != nil {
-			log.Printf("Error reloading client for context %s: %v", contextName, err)
+			cm.logger.Error("failed to reload kubernetes client", "context", contextName, "error", err)
 			continue
 		}
 
