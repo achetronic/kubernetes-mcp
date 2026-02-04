@@ -161,7 +161,7 @@ func (cm *ClientManager) loadContextsFromDir(dir string) error {
 	return nil
 }
 
-// trackFile adds a kubeconfig file to the watcher
+// trackFile adds a kubeconfig file to the watcher by watching its parent directory
 func (cm *ClientManager) trackFile(path string, contextName string) {
 	absPath, err := filepath.Abs(path)
 	if err != nil {
@@ -171,8 +171,11 @@ func (cm *ClientManager) trackFile(path string, contextName string) {
 
 	cm.fileToContexts[absPath] = append(cm.fileToContexts[absPath], contextName)
 
-	if err := cm.watcher.Add(absPath); err != nil {
-		log.Printf("Warning: failed to watch kubeconfig %s: %v", absPath, err)
+	// Watch the parent directory instead of the file directly
+	// This is more robust for atomic writes (temp file + rename)
+	dir := filepath.Dir(absPath)
+	if err := cm.watcher.Add(dir); err != nil {
+		log.Printf("Warning: failed to watch directory %s for kubeconfig %s: %v", dir, absPath, err)
 	}
 }
 
@@ -199,6 +202,15 @@ func (cm *ClientManager) watchFiles() {
 			}
 
 			absPath, _ := filepath.Abs(event.Name)
+
+			// Check if this file is one we're tracking
+			cm.mutex.RLock()
+			_, tracked := cm.fileToContexts[absPath]
+			cm.mutex.RUnlock()
+
+			if !tracked {
+				continue
+			}
 
 			pendingMu.Lock()
 			pendingFiles[absPath] = struct{}{}
