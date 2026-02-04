@@ -222,11 +222,19 @@ func (cm *ClientManager) watchFiles() {
 
 			// Check if this is a new file in the contexts directory
 			if event.Op&fsnotify.Create != 0 && cm.config.ContextsDir != "" {
-				absDir, _ := filepath.Abs(cm.config.ContextsDir)
+				absDir, err := filepath.Abs(cm.config.ContextsDir)
+				if err != nil {
+					cm.logger.Warn("failed to get absolute path for contexts directory", "path", cm.config.ContextsDir, "error", err)
+					continue
+				}
 				if filepath.Dir(absPath) == absDir {
-					if err := cm.loadNewContextFromFile(absPath); err != nil {
-						cm.logger.Error("failed to load new kubeconfig", "path", absPath, "error", err)
-					}
+					// Debounce: wait for file to be fully written before loading
+					filePath := absPath
+					time.AfterFunc(500*time.Millisecond, func() {
+						if err := cm.loadNewContextFromFile(filePath); err != nil {
+							cm.logger.Error("failed to load new kubeconfig", "path", filePath, "error", err)
+						}
+					})
 					continue
 				}
 			}
@@ -309,6 +317,11 @@ func (cm *ClientManager) loadNewContextFromFile(kubeconfigPath string) error {
 	cm.clients[contextName] = client
 	cm.contextsByName[contextName] = ctxConfig
 	cm.fileToContexts[kubeconfigPath] = append(cm.fileToContexts[kubeconfigPath], contextName)
+
+	// Watch the new kubeconfig file for future changes
+	if err := cm.watcher.Add(kubeconfigPath); err != nil {
+		cm.logger.Warn("failed to watch new kubeconfig file", "path", kubeconfigPath, "error", err)
+	}
 
 	cm.logger.Info("loaded new kubeconfig from contexts directory", "context", contextName, "kubeconfig", kubeconfigPath)
 	return nil
