@@ -27,7 +27,7 @@ import (
 )
 
 func (m *Manager) registerGetResource() {
-	tool := mcp.NewTool("get_resource",
+	tool := mcp.NewTool(m.toolName("get_resource"),
 		mcp.WithDescription("Gets a specific Kubernetes resource by name"),
 		mcp.WithString("context", mcp.Description("Kubernetes context to use (optional, uses current if not specified)")),
 		mcp.WithString("group", mcp.Description("API group (e.g., 'apps', 'batch', empty for core)")),
@@ -98,7 +98,7 @@ func (m *Manager) handleGetResource(ctx context.Context, request mcp.CallToolReq
 }
 
 func (m *Manager) registerListResources() {
-	tool := mcp.NewTool("list_resources",
+	tool := mcp.NewTool(m.toolName("list_resources"),
 		mcp.WithDescription("Lists Kubernetes resources with optional filters"),
 		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
 		mcp.WithString("group", mcp.Description("API group")),
@@ -169,7 +169,7 @@ func (m *Manager) handleListResources(ctx context.Context, request mcp.CallToolR
 }
 
 func (m *Manager) registerDescribeResource() {
-	tool := mcp.NewTool("describe_resource",
+	tool := mcp.NewTool(m.toolName("describe_resource"),
 		mcp.WithDescription("Gets detailed information about a resource including related events"),
 		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
 		mcp.WithString("group", mcp.Description("API group")),

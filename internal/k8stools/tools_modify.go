@@ -32,7 +32,7 @@ import (
 )
 
 func (m *Manager) registerApplyManifest() {
-	tool := mcp.NewTool("apply_manifest",
+	tool := mcp.NewTool(m.toolName("apply_manifest"),
 		mcp.WithDescription("Applies a YAML/JSON manifest (create or update)"),
 		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
 		mcp.WithString("manifest", mcp.Required(), mcp.Description("YAML or JSON manifest to apply")),
@@ -109,7 +109,7 @@ func (m *Manager) handleApplyManifest(ctx context.Context, request mcp.CallToolR
 }
 
 func (m *Manager) registerPatchResource() {
-	tool := mcp.NewTool("patch_resource",
+	tool := mcp.NewTool(m.toolName("patch_resource"),
 		mcp.WithDescription("Patches an existing Kubernetes resource"),
 		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
 		mcp.WithString("group", mcp.Description("API group")),
@@ -204,7 +204,7 @@ func (m *Manager) handlePatchResource(ctx context.Context, request mcp.CallToolR
 }
 
 func (m *Manager) registerDeleteResource() {
-	tool := mcp.NewTool("delete_resource",
+	tool := mcp.NewTool(m.toolName("delete_resource"),
 		mcp.WithDescription("Deletes a Kubernetes resource"),
 		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
 		mcp.WithString("group", mcp.Description("API group")),
@@ -264,7 +264,7 @@ func (m *Manager) handleDeleteResource(ctx context.Context, request mcp.CallTool
 }
 
 func (m *Manager) registerDeleteResources() {
-	tool := mcp.NewTool("delete_resources",
+	tool := mcp.NewTool(m.toolName("delete_resources"),
 		mcp.WithDescription("Deletes multiple Kubernetes resources matching selectors"),
 		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
 		mcp.WithString("group", mcp.Description("API group")),

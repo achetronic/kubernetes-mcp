@@ -35,6 +35,7 @@ type Manager struct {
 	authz         *authorization.Evaluator
 	yq            *yqutil.Evaluator
 	mcpServer     *server.MCPServer
+	toolPrefix    string
 }
 
 // ManagerDependencies holds dependencies for the Manager
@@ -44,6 +45,7 @@ type ManagerDependencies struct {
 	ClientManager *kubernetes.ClientManager
 	Authz         *authorization.Evaluator
 	McpServer     *server.MCPServer
+	ToolPrefix    string
 }
 
 // NewManager creates a new k8s tools manager
@@ -55,7 +57,12 @@ func NewManager(deps ManagerDependencies) *Manager {
 		authz:         deps.Authz,
 		yq:            yqutil.NewEvaluator(),
 		mcpServer:     deps.McpServer,
+		toolPrefix:    deps.ToolPrefix,
 	}
+}
+
+func (m *Manager) toolName(base string) string {
+	return m.toolPrefix + base
 }
 
 // RegisterAll registers all Kubernetes tools with the MCP server

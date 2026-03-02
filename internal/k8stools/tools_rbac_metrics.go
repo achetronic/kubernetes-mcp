@@ -28,7 +28,7 @@ import (
 )
 
 func (m *Manager) registerCheckPermission() {
-	tool := mcp.NewTool("check_permission",
+	tool := mcp.NewTool(m.toolName("check_permission"),
 		mcp.WithDescription("Checks if an action is allowed (SelfSubjectAccessReview)"),
 		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
 		mcp.WithString("verb", mcp.Required(), mcp.Description("Verb to check: get, list, create, update, delete, etc.")),
@@ -105,7 +105,7 @@ func (m *Manager) handleCheckPermission(ctx context.Context, request mcp.CallToo
 }
 
 func (m *Manager) registerGetPodMetrics() {
-	tool := mcp.NewTool("get_pod_metrics",
+	tool := mcp.NewTool(m.toolName("get_pod_metrics"),
 		mcp.WithDescription("Gets CPU and memory usage for pods (requires metrics-server)"),
 		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
 		mcp.WithString("namespace", mcp.Description("Namespace (optional)")),
@@ -185,7 +185,7 @@ func (m *Manager) handleGetPodMetrics(ctx context.Context, request mcp.CallToolR
 }
 
 func (m *Manager) registerGetNodeMetrics() {
-	tool := mcp.NewTool("get_node_metrics",
+	tool := mcp.NewTool(m.toolName("get_node_metrics"),
 		mcp.WithDescription("Gets CPU and memory usage for nodes (requires metrics-server)"),
 		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
 		mcp.WithString("name", mcp.Description("Node name (optional, lists all if empty)")),

@@ -26,7 +26,7 @@ import (
 )
 
 func (m *Manager) registerGetCurrentContext() {
-	tool := mcp.NewTool("get_current_context",
+	tool := mcp.NewTool(m.toolName("get_current_context"),
 		mcp.WithDescription("Gets the current Kubernetes context"),
 	)
 	m.mcpServer.AddTool(tool, m.handleGetCurrentContext)
@@ -58,7 +58,7 @@ func (m *Manager) handleGetCurrentContext(ctx context.Context, request mcp.CallT
 }
 
 func (m *Manager) registerListContexts() {
-	tool := mcp.NewTool("list_contexts",
+	tool := mcp.NewTool(m.toolName("list_contexts"),
 		mcp.WithDescription("Lists available Kubernetes contexts"),
 		mcp.WithArray("yq_expressions", mcp.Description("Array of yq expressions (https://mikefarah.gitbook.io/yq) to filter/transform the YAML output. Applied sequentially. Examples: '.[].name' (get context names), '.[] | select(.current == true)' (get current context)")),
 	)
@@ -110,7 +110,7 @@ func (m *Manager) handleListContexts(ctx context.Context, request mcp.CallToolRe
 }
 
 func (m *Manager) registerSwitchContext() {
-	tool := mcp.NewTool("switch_context",
+	tool := mcp.NewTool(m.toolName("switch_context"),
 		mcp.WithDescription("Switches the active Kubernetes context"),
 		mcp.WithString("context_name", mcp.Required(), mcp.Description("Name of the context to switch to")),
 	)

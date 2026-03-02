@@ -30,7 +30,7 @@ import (
 )
 
 func (m *Manager) registerDiffManifest() {
-	tool := mcp.NewTool("diff_manifest",
+	tool := mcp.NewTool(m.toolName("diff_manifest"),
 		mcp.WithDescription("Compares a manifest with the current cluster state"),
 		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
 		mcp.WithString("manifest", mcp.Required(), mcp.Description("YAML or JSON manifest to compare")),

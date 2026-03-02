@@ -19,17 +19,35 @@ package globals
 import (
 	"context"
 	"flag"
-	"kubernetes-mcp/api"
-	"kubernetes-mcp/internal/config"
 	"log/slog"
 	"os"
+	"regexp"
+	"strings"
+
+	"kubernetes-mcp/api"
+	"kubernetes-mcp/internal/config"
 )
 
 type ApplicationContext struct {
-	Context context.Context
-	Logger  *slog.Logger
-	Config  *api.Configuration
+	Context    context.Context
+	Logger     *slog.Logger
+	Config     *api.Configuration
+	ToolPrefix string
 }
+
+var nonAlphanumRe = regexp.MustCompile(`[^a-z0-9]+`)
+
+func SanitizeToolPrefix(name string) string {
+	s := strings.ToLower(strings.TrimSpace(name))
+	s = nonAlphanumRe.ReplaceAllString(s, "_")
+	s = strings.Trim(s, "_")
+	if s == "" {
+		return ""
+	}
+	return s + "_"
+}
+
+const defaultServerName = "kubernetes-mcp"
 
 func NewApplicationContext() (*ApplicationContext, error) {
 
@@ -47,6 +65,11 @@ func NewApplicationContext() (*ApplicationContext, error) {
 		return appCtx, err
 	}
 	appCtx.Config = &configContent
+	serverName := configContent.Server.Name
+	if serverName == "" {
+		serverName = defaultServerName
+	}
+	appCtx.ToolPrefix = SanitizeToolPrefix(serverName)
 
 	//
 	return appCtx, nil

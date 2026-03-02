@@ -34,7 +34,7 @@ import (
 )
 
 func (m *Manager) registerGetLogs() {
-	tool := mcp.NewTool("get_logs",
+	tool := mcp.NewTool(m.toolName("get_logs"),
 		mcp.WithDescription("Gets logs from a Pod"),
 		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
 		mcp.WithString("name", mcp.Required(), mcp.Description("Pod name")),
@@ -115,7 +115,7 @@ func (m *Manager) handleGetLogs(ctx context.Context, request mcp.CallToolRequest
 }
 
 func (m *Manager) registerExecCommand() {
-	tool := mcp.NewTool("exec_command",
+	tool := mcp.NewTool(m.toolName("exec_command"),
 		mcp.WithDescription("Executes a command in a container (non-interactive)"),
 		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
 		mcp.WithString("name", mcp.Required(), mcp.Description("Pod name")),
@@ -212,7 +212,7 @@ func (m *Manager) handleExecCommand(ctx context.Context, request mcp.CallToolReq
 }
 
 func (m *Manager) registerListEvents() {
-	tool := mcp.NewTool("list_events",
+	tool := mcp.NewTool(m.toolName("list_events"),
 		mcp.WithDescription("Lists cluster or namespace events"),
 		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
 		mcp.WithString("namespace", mcp.Description("Namespace (empty for all namespaces)")),

@@ -95,6 +95,7 @@ func main() {
 			ClientManager: clientManager,
 			Authz:         authzEvaluator,
 			McpServer:     mcpServer,
+			ToolPrefix:    appCtx.ToolPrefix,
 		})
 		k8sManager.RegisterAll()
 		appCtx.Logger.Info("registered Kubernetes tools", "contexts", clientManager.ListContexts())

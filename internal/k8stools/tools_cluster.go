@@ -27,7 +27,7 @@ import (
 )
 
 func (m *Manager) registerListAPIResources() {
-	tool := mcp.NewTool("list_api_resources",
+	tool := mcp.NewTool(m.toolName("list_api_resources"),
 		mcp.WithDescription("Lists available API resources in the cluster"),
 		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
 		mcp.WithString("api_group", mcp.Description("Filter by API group")),
@@ -128,7 +128,7 @@ func (m *Manager) handleListAPIResources(ctx context.Context, request mcp.CallTo
 }
 
 func (m *Manager) registerListAPIVersions() {
-	tool := mcp.NewTool("list_api_versions",
+	tool := mcp.NewTool(m.toolName("list_api_versions"),
 		mcp.WithDescription("Lists available API versions"),
 		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
 		mcp.WithArray("yq_expressions", mcp.Description("Array of yq expressions (https://mikefarah.gitbook.io/yq) to filter/transform the YAML output. Applied sequentially. Examples: '.groups[].name' (get group names), '.groups[] | select(.name == \"apps\")' (filter specific group)")),
@@ -174,7 +174,7 @@ func (m *Manager) handleListAPIVersions(ctx context.Context, request mcp.CallToo
 }
 
 func (m *Manager) registerGetClusterInfo() {
-	tool := mcp.NewTool("get_cluster_info",
+	tool := mcp.NewTool(m.toolName("get_cluster_info"),
 		mcp.WithDescription("Gets basic cluster information"),
 		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
 	)
@@ -241,7 +241,7 @@ func (m *Manager) handleGetClusterInfo(ctx context.Context, request mcp.CallTool
 }
 
 func (m *Manager) registerListNamespaces() {
-	tool := mcp.NewTool("list_namespaces",
+	tool := mcp.NewTool(m.toolName("list_namespaces"),
 		mcp.WithDescription("Lists namespaces"),
 		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
 		mcp.WithString("label_selector", mcp.Description("Label selector")),

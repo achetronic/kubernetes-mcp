@@ -31,7 +31,7 @@ import (
 )
 
 func (m *Manager) registerScaleResource() {
-	tool := mcp.NewTool("scale_resource",
+	tool := mcp.NewTool(m.toolName("scale_resource"),
 		mcp.WithDescription("Scales a Deployment, ReplicaSet, or StatefulSet"),
 		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
 		mcp.WithString("group", mcp.Description("API group (default: apps)")),
@@ -106,7 +106,7 @@ func (m *Manager) handleScaleResource(ctx context.Context, request mcp.CallToolR
 }
 
 func (m *Manager) registerGetRolloutStatus() {
-	tool := mcp.NewTool("get_rollout_status",
+	tool := mcp.NewTool(m.toolName("get_rollout_status"),
 		mcp.WithDescription("Gets the status of a rollout"),
 		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
 		mcp.WithString("group", mcp.Description("API group (default: apps)")),
@@ -203,7 +203,7 @@ func (m *Manager) handleGetRolloutStatus(ctx context.Context, request mcp.CallTo
 }
 
 func (m *Manager) registerRestartRollout() {
-	tool := mcp.NewTool("restart_rollout",
+	tool := mcp.NewTool(m.toolName("restart_rollout"),
 		mcp.WithDescription("Restarts a rollout by updating the restart annotation"),
 		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
 		mcp.WithString("group", mcp.Description("API group (default: apps)")),
@@ -277,7 +277,7 @@ func (m *Manager) handleRestartRollout(ctx context.Context, request mcp.CallTool
 }
 
 func (m *Manager) registerUndoRollout() {
-	tool := mcp.NewTool("undo_rollout",
+	tool := mcp.NewTool(m.toolName("undo_rollout"),
 		mcp.WithDescription("Reverts a rollout to a previous revision"),
 		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
 		mcp.WithString("group", mcp.Description("API group (default: apps)")),
