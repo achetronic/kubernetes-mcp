@@ -60,7 +60,7 @@ type Evaluator struct {
 
 // AuthzRequest represents the data available for authorization evaluation
 type AuthzRequest struct {
-	Payload   map[string]any // JWT claims
+	Payload   map[string]any // Authentication payload (JWT claims or API key payload)
 	Tool      string         // Tool being invoked
 	Context   string         // Kubernetes context
 	Namespace string         // Resource namespace (if applicable)
@@ -553,17 +553,3 @@ func (e *Evaluator) IsAnnotationPrefixAllowed(req AuthzRequest, annotationKey st
 	return false, nil
 }
 
-// GetIdentity extracts the identity from the JWT payload based on the configured claim
-func (e *Evaluator) GetIdentity(payload map[string]any) string {
-	if e.config.IdentityClaim == "" {
-		return ""
-	}
-
-	if val, ok := payload[e.config.IdentityClaim]; ok {
-		if str, ok := val.(string); ok {
-			return str
-		}
-	}
-
-	return ""
-}

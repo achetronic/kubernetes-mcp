@@ -42,23 +42,16 @@ type AccessLogsConfig struct {
 	RedactedHeaders []string `yaml:"redacted_headers"`
 }
 
-// JWTValidationLocalConfig represents the local JWT validation configuration
-type JWTValidationLocalConfig struct {
-	JWKSUri         string                        `yaml:"jwks_uri"`
-	CacheInterval   time.Duration                 `yaml:"cache_interval"`
-	AllowConditions []JWTValidationAllowCondition `yaml:"allow_conditions,omitempty"`
-}
-
-// JWTValidationAllowCondition represents a condition for allowing a request after the local JWT validation configuration
+// JWTValidationAllowCondition represents a condition for allowing a request after JWT validation
 type JWTValidationAllowCondition struct {
 	Expression string `yaml:"expression"`
 }
 
 // JWTValidationConfig represents the JWT validation configuration
 type JWTValidationConfig struct {
-	Strategy        string                   `yaml:"strategy"`
-	ForwardedHeader string                   `yaml:"forwarded_header,omitempty"`
-	Local           JWTValidationLocalConfig `yaml:"local,omitempty"`
+	JWKSUri         string                        `yaml:"jwks_uri"`
+	CacheInterval   time.Duration                 `yaml:"cache_interval"`
+	AllowConditions []JWTValidationAllowCondition `yaml:"allow_conditions,omitempty"`
 }
 
 // JWTConfig represents the JWT middleware configuration
@@ -67,10 +60,24 @@ type JWTConfig struct {
 	Validation JWTValidationConfig `yaml:"validation,omitempty"`
 }
 
+// APIKeyConfig represents a single API key entry
+type APIKeyConfig struct {
+	Name   string         `yaml:"name"`
+	Token  string         `yaml:"token"`
+	Payload map[string]any `yaml:"payload"`
+}
+
+// APIKeysConfig represents the API keys middleware configuration
+type APIKeysConfig struct {
+	Enabled bool           `yaml:"enabled"`
+	Keys    []APIKeyConfig `yaml:"keys,omitempty"`
+}
+
 // MiddlewareConfig represents the middleware configuration section
 type MiddlewareConfig struct {
 	AccessLogs AccessLogsConfig `yaml:"access_logs"`
 	JWT        JWTConfig        `yaml:"jwt,omitempty"`
+	APIKeys    APIKeysConfig    `yaml:"api_keys,omitempty"`
 }
 
 // OAuthAuthorizationServer represents the OAuth Authorization Server configuration
@@ -180,7 +187,6 @@ type AuthorizationPolicy struct {
 // AuthorizationConfig represents the authorization configuration
 type AuthorizationConfig struct {
 	AllowAnonymous bool                  `yaml:"allow_anonymous"`
-	IdentityClaim  string                `yaml:"identity_claim"`
 	Policies       []AuthorizationPolicy `yaml:"policies"`
 }
 

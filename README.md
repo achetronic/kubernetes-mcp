@@ -133,7 +133,8 @@ kubernetes:
 <summary><strong>🛡️ Enterprise-Ready Security</strong></summary>
 
 - **OAuth 2.1 compliant** with RFC 8414 and RFC 9728 endpoints
-- **JWT validation**: Local (JWKS) or external (Istio/Envoy)
+- **JWT validation** with JWKS and CEL-based claim conditions
+- **API key authentication** with static tokens and configurable payloads
 - **Namespace allow/deny lists** per cluster
 - **Access logs** with header redaction
 
@@ -305,18 +306,25 @@ middleware:
       - X-Request-Id
     redacted_headers:
       - Authorization
-      - X-Validated-Jwt
 
   jwt:
     enabled: true
     validation:
-      strategy: "local" # "local" or "external"
-      forwarded_header: "X-Validated-Jwt"
-      local:
-        jwks_uri: "https://keycloak.example.com/realms/mcp/protocol/openid-connect/certs"
-        cache_interval: "10s"
-        allow_conditions:
-          - expression: "has(payload.email)"
+      jwks_uri: "https://keycloak.example.com/realms/mcp/protocol/openid-connect/certs"
+      cache_interval: "10s"
+      allow_conditions:
+        - expression: "has(payload.email)"
+
+  api_keys:
+    enabled: true
+    keys:
+      - name: "ci-cd-pipeline"
+        token: "$CI_API_KEY"
+        payload:
+          sub: "ci-cd-service"
+          email: "ci@company.com"
+          groups:
+            - "ci-cd"
 
 # OAuth Configuration (optional, for remote clients)
 oauth_authorization_server:
@@ -360,7 +368,6 @@ kubernetes:
 # Authorization Configuration
 authorization:
   allow_anonymous: false
-  identity_claim: "email"
   policies:
     - name: "sre-full-access"
       description: "SRE team has full access"
@@ -393,16 +400,77 @@ kubernetes:
       kubeconfig: "$PROD_KUBECONFIG" # Expanded at runtime
 ```
 
-### JWT Validation Strategies
+### Authentication
 
-| Strategy   | Use Case                                                                         |
-| ---------- | -------------------------------------------------------------------------------- |
-| `external` | JWT validated by proxy (Istio, Envoy). MCP reads claims from forwarded header    |
-| `local`    | MCP validates JWT using JWKS URI. Supports CEL expressions for claims validation |
+Kubernetes MCP supports two authentication methods. Both produce the same `payload` map used
+by authorization policies, so RBAC rules work identically regardless of the method.
+
+#### JWT Validation
+
+Validates Bearer tokens against a JWKS endpoint. Claims from the JWT become the `payload`
+available in CEL expressions.
+
+```yaml
+middleware:
+  jwt:
+    enabled: true
+    validation:
+      jwks_uri: "https://keycloak.example.com/realms/mcp/protocol/openid-connect/certs"
+      cache_interval: "10s"
+      allow_conditions:
+        - expression: 'has(payload.email)'
+```
+
+| Field | Description |
+|-------|-------------|
+| `jwks_uri` | URL to the JWKS endpoint for signature verification |
+| `cache_interval` | How often to refresh the JWKS keys |
+| `allow_conditions` | CEL expressions that must all evaluate to `true` for the JWT to be accepted |
+
+#### API Key Authentication
+
+Static Bearer tokens with a preconfigured `payload`. Useful for CI/CD pipelines, service accounts,
+or environments where an identity provider is not available.
+
+```yaml
+middleware:
+  api_keys:
+    enabled: true
+    keys:
+      - name: "ci-cd-pipeline"
+        token: "$CI_API_KEY"
+        payload:
+          sub: "ci-cd-service"
+          email: "ci@company.com"
+          groups:
+            - "ci-cd"
+
+      - name: "monitoring"
+        token: "$MONITORING_API_KEY"
+        payload:
+          sub: "monitoring-agent"
+          groups:
+            - "readonly"
+```
+
+| Field | Description |
+|-------|-------------|
+| `name` | Human-readable identifier for the key (used in logs) |
+| `token` | The Bearer token value. Supports environment variable expansion |
+| `payload` | Map of fields injected as the authentication payload for RBAC evaluation |
+
+> **Security**: Tokens are compared using constant-time comparison (SHA-256 hashed at startup)
+> to prevent timing attacks. Use environment variables (`$CI_API_KEY`) instead of hardcoding tokens.
+
+#### Combined Usage
+
+When both methods are enabled, the middleware chain tries JWT first. If the token is not a valid JWT,
+it falls through to API key matching. If neither succeeds, the request proceeds unauthenticated
+(denied by default unless `allow_anonymous: true`).
 
 ### Authorization Policy Evaluation
 
-1. If JWT enabled and no token → **deny** (unless `allow_anonymous: true`)
+1. If authentication enabled and no valid token → **deny** (unless `allow_anonymous: true`)
 2. Find **all** policies whose `match` expression is true
 3. For each policy: `effective = allow - deny`
 4. Final result: **union** of all effective permissions
@@ -647,7 +715,7 @@ kubernetes-mcp/
 │   ├── kubernetes/client.go       # Multi-cluster client manager
 │   ├── authorization/evaluator.go # RBAC evaluator
 │   ├── yqutil/evaluator.go        # yq expression processor
-│   ├── middlewares/               # JWT, logging middlewares
+│   ├── middlewares/               # Auth, JWT, API key, logging middlewares
 │   └── handlers/                  # OAuth endpoints
 ├── docs/
 │   ├── config-http.yaml           # HTTP mode example

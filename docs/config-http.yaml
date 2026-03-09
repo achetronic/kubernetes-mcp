@@ -14,17 +14,30 @@ middleware:
       - X-Excluded
     redacted_headers:
       - Authorization
-      - X-Validated-Jwt
 
   jwt:
     enabled: true
     validation:
-      strategy: "external"  # Values: 'local' or 'external'
-      forwarded_header: "X-Validated-Jwt"
-      local:
-        jwks_uri: &JwksUri "https://keycloak.example.com/realms/mcp-servers/protocol/openid-connect/certs"
-        cache_interval: "10s"
-        allow_conditions: []
+      jwks_uri: &JwksUri "https://keycloak.example.com/realms/mcp-servers/protocol/openid-connect/certs"
+      cache_interval: "10s"
+      allow_conditions: []
+
+  api_keys:
+    enabled: false
+    # keys:
+    #   - name: "ci-cd-pipeline"
+    #     token: "$CI_API_KEY"
+    #     payload:
+    #       sub: "ci-cd-service"
+    #       email: "ci@company.com"
+    #       groups:
+    #         - "ci-cd"
+    #   - name: "monitoring"
+    #     token: "$MONITORING_API_KEY"
+    #     payload:
+    #       sub: "monitoring-agent"
+    #       groups:
+    #         - "readonly"
 
 # Oauth Authorization Server Configuration
 oauth_authorization_server:
@@ -77,7 +90,6 @@ kubernetes:
 # Authorization Configuration
 authorization:
   allow_anonymous: false
-  identity_claim: "email"
   policies:
     # Allow all for authenticated users (basic policy)
     - name: "authenticated-users"

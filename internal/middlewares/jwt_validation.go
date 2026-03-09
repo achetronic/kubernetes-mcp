@@ -18,6 +18,7 @@ package middlewares
 
 import (
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -53,8 +54,7 @@ func NewJWTValidationMiddleware(deps JWTValidationMiddlewareDependencies) (*JWTV
 	}
 
 	// Launch JWKS worker only when requested
-	if mw.dependencies.AppCtx.Config.Middleware.JWT.Enabled &&
-		mw.dependencies.AppCtx.Config.Middleware.JWT.Validation.Strategy == "local" {
+	if mw.dependencies.AppCtx.Config.Middleware.JWT.Enabled {
 		go mw.cacheJWKS()
 	}
 
@@ -67,7 +67,7 @@ func NewJWTValidationMiddleware(deps JWTValidationMiddlewareDependencies) (*JWTV
 		return nil, fmt.Errorf("CEL environment creation error: %s", err.Error())
 	}
 
-	for _, allowCondition := range mw.dependencies.AppCtx.Config.Middleware.JWT.Validation.Local.AllowConditions {
+	for _, allowCondition := range mw.dependencies.AppCtx.Config.Middleware.JWT.Validation.AllowConditions {
 
 		// Compile and execute the code
 		ast, issues := allowConditionsEnv.Compile(allowCondition.Expression)
@@ -91,6 +91,13 @@ func (mw *JWTValidationMiddleware) Middleware(next http.Handler) http.Handler {
 
 		var wwwAuthResourceMetadataUrl string
 		var wwwAuthScope string
+		var authHeader string
+		var tokenString string
+		var tokenStringParts []string
+		var tokenPayloadBytes []byte
+		var tokenPayload map[string]any
+		var payloadJSON []byte
+		var err error
 
 		if !mw.dependencies.AppCtx.Config.Middleware.JWT.Enabled {
 			goto nextStage
@@ -108,70 +115,66 @@ func (mw *JWTValidationMiddleware) Middleware(next http.Handler) http.Handler {
 						  resource_metadata="`+wwwAuthResourceMetadataUrl+`", 
 						  scope="`+wwwAuthScope+`"`)
 
-		//
-		switch mw.dependencies.AppCtx.Config.Middleware.JWT.Validation.Strategy {
-		case "local":
-			// 1. Extract token from header
-			authHeader := req.Header.Get("Authorization")
-			if authHeader == "" {
-				http.Error(rw, "RBAC: Access Denied: Authorization header not found", http.StatusUnauthorized)
-				return
+		// 1. Extract token from header
+		authHeader = req.Header.Get("Authorization")
+		if authHeader == "" {
+			if mw.dependencies.AppCtx.Config.Middleware.APIKeys.Enabled {
+				goto nextStage
 			}
-			tokenString := strings.Replace(authHeader, "Bearer ", "", 1)
+			http.Error(rw, "RBAC: Access Denied: Authorization header not found", http.StatusUnauthorized)
+			return
+		}
+		tokenString = strings.Replace(authHeader, "Bearer ", "", 1)
 
-			// Reject unauthorized requests
-			_, err := mw.isTokenValid(tokenString)
-			if err != nil {
-				http.Error(rw, fmt.Sprintf("RBAC: Access Denied: Invalid token: %v", err.Error()), http.StatusUnauthorized)
-				return
+		// 2. Validate the JWT against JWKS
+		_, err = mw.isTokenValid(tokenString)
+		if err != nil {
+			if mw.dependencies.AppCtx.Config.Middleware.APIKeys.Enabled {
+				goto nextStage
 			}
+			http.Error(rw, fmt.Sprintf("RBAC: Access Denied: Invalid token: %v", err.Error()), http.StatusUnauthorized)
+			return
+		}
 
-			// Put the JWT into the validated request header
-			req.Header.Set(mw.dependencies.AppCtx.Config.Middleware.JWT.Validation.ForwardedHeader, tokenString)
+		// 3. Extract and decode the JWT payload
+		tokenStringParts = strings.Split(tokenString, ".")
+		tokenPayloadBytes, err = base64.RawURLEncoding.DecodeString(tokenStringParts[1])
+		if err != nil {
+			mw.dependencies.AppCtx.Logger.Error("error decoding JWT payload from base64", "error", err.Error())
+			http.Error(rw, fmt.Sprintf("RBAC: Access Denied: JWT Payload can not be decoded"), http.StatusUnauthorized)
+			return
+		}
 
-			// Extract the JWT payload
-			tokenStringParts := strings.Split(tokenString, ".")
+		tokenPayload = map[string]any{}
+		err = json.Unmarshal(tokenPayloadBytes, &tokenPayload)
+		if err != nil {
+			mw.dependencies.AppCtx.Logger.Error("error decoding JWT payload from JSON", "error", err.Error())
+			http.Error(rw, fmt.Sprintf("RBAC: Access Denied: Internal Issue"), http.StatusUnauthorized)
+			return
+		}
 
-			// Decode it into a Go's structure for later
-			tokenPayloadBytes, err := base64.RawURLEncoding.DecodeString(tokenStringParts[1])
+		// 4. Evaluate CEL allow conditions against the JWT claims
+		for _, celProgram := range mw.celPrograms {
+			out, _, err := (*celProgram).Eval(map[string]interface{}{
+				"payload": tokenPayload,
+			})
+
 			if err != nil {
-				mw.dependencies.AppCtx.Logger.Error("error decoding JWT payload from base64", "error", err.Error())
-				http.Error(rw, fmt.Sprintf("RBAC: Access Denied: JWT Payload can not be decoded"), http.StatusUnauthorized)
-				return
-			}
-
-			tokenPayload := map[string]any{}
-			err = json.Unmarshal(tokenPayloadBytes, &tokenPayload)
-			if err != nil {
-				mw.dependencies.AppCtx.Logger.Error("error decoding JWT payload from JSON", "error", err.Error())
+				mw.dependencies.AppCtx.Logger.Error("CEL program evaluation error", "error", err.Error())
 				http.Error(rw, fmt.Sprintf("RBAC: Access Denied: Internal Issue"), http.StatusUnauthorized)
 				return
 			}
 
-			// Check allowance conditions for the JWT
-			// At this point, we assume the JWT is unmarshalled into a golang structure
-			for _, celProgram := range mw.celPrograms {
-				out, _, err := (*celProgram).Eval(map[string]interface{}{
-					"payload": tokenPayload,
-				})
-
-				if err != nil {
-					mw.dependencies.AppCtx.Logger.Error("CEL program evaluation error", "error", err.Error())
-					http.Error(rw, fmt.Sprintf("RBAC: Access Denied: Internal Issue"), http.StatusUnauthorized)
-					return
-				}
-
-				if out.Value() != true {
-					http.Error(rw, fmt.Sprintf("RBAC: Access Denied: JWT does not meet conditions"), http.StatusUnauthorized)
-					return
-				}
+			if out.Value() != true {
+				http.Error(rw, fmt.Sprintf("RBAC: Access Denied: JWT does not meet conditions"), http.StatusUnauthorized)
+				return
 			}
-
-		default:
-			// Having a validated JWT into a specific header is the default behavior,
-			// as having tools like Istio securing APIs is much more safe and reliable
-			// When the token is already validated, do nothing.
 		}
+
+		// 5. Mark request as JWT-authenticated
+		req.Header.Set(AuthMethodHeader, AuthMethodJWT)
+		payloadJSON, _ = json.Marshal(tokenPayload)
+		req.Header.Set(AuthPayloadHeader, hex.EncodeToString(payloadJSON))
 
 	nextStage:
 		rw.Header().Del("WWW-Authenticate")

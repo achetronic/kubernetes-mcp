@@ -51,6 +51,13 @@ func main() {
 		appCtx.Logger.Info("failed starting JWT validation middleware", "error", err.Error())
 	}
 
+	apiKeyValidationMw, err := middlewares.NewAPIKeyValidationMiddleware(middlewares.APIKeyValidationMiddlewareDependencies{
+		AppCtx: appCtx,
+	})
+	if err != nil {
+		appCtx.Logger.Info("failed starting API key validation middleware", "error", err.Error())
+	}
+
 	// 2. Create a new MCP server
 	mcpServer := server.NewMCPServer(
 		appCtx.Config.Server.Name,
@@ -112,7 +119,7 @@ func main() {
 		// Custom endpoints are needed as the library is not feature-complete according to MCP spec requirements (2025-06-16)
 		// Ref: https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization#overview
 		mux := http.NewServeMux()
-		mux.Handle("/mcp", accessLogsMw.Middleware(jwtValidationMw.Middleware(httpServer)))
+		mux.Handle("/mcp", accessLogsMw.Middleware(jwtValidationMw.Middleware(apiKeyValidationMw.Middleware(httpServer))))
 
 		if appCtx.Config.OAuthAuthorizationServer.Enabled {
 			mux.Handle("/.well-known/oauth-authorization-server"+appCtx.Config.OAuthAuthorizationServer.UrlSuffix,

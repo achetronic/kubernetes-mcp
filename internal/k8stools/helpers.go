@@ -17,12 +17,13 @@ limitations under the License.
 package k8stools
 
 import (
-	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
 
 	"kubernetes-mcp/internal/authorization"
+	"kubernetes-mcp/internal/middlewares"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -30,30 +31,22 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-// extractJWTPayload extracts the JWT payload from the request header
-func (m *Manager) extractJWTPayload(request mcp.CallToolRequest) map[string]any {
-	jwtHeader := m.config.Middleware.JWT.Validation.ForwardedHeader
-	if jwtHeader == "" {
+// extractAuthPayload extracts the authentication payload from the request.
+// It supports both JWT and API key authentication methods.
+// The payload is read from the X-Auth-Payload header set by the auth middlewares.
+func (m *Manager) extractAuthPayload(request mcp.CallToolRequest) map[string]any {
+	payloadHex := request.Header.Get(middlewares.AuthPayloadHeader)
+	if payloadHex == "" {
 		return nil
 	}
 
-	tokenString := request.Header.Get(jwtHeader)
-	if tokenString == "" {
-		return nil
-	}
-
-	parts := strings.Split(tokenString, ".")
-	if len(parts) != 3 {
-		return nil
-	}
-
-	payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
+	payloadJSON, err := hex.DecodeString(payloadHex)
 	if err != nil {
 		return nil
 	}
 
 	var payload map[string]any
-	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
+	if err := json.Unmarshal(payloadJSON, &payload); err != nil {
 		return nil
 	}
 
@@ -66,7 +59,7 @@ func (m *Manager) checkAuthorization(request mcp.CallToolRequest, tool, k8sConte
 		return nil
 	}
 
-	payload := m.extractJWTPayload(request)
+	payload := m.extractAuthPayload(request)
 
 	allowed, err := m.authz.Evaluate(authorization.AuthzRequest{
 		Payload:   payload,

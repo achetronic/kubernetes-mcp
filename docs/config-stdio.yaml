@@ -14,6 +14,9 @@ middleware:
   jwt:
     enabled: false
 
+  api_keys:
+    enabled: false
+
 # Kubernetes Configuration
 kubernetes:
   default_context: "default"
@@ -34,7 +37,6 @@ kubernetes:
 # Authorization Configuration - Allow all for local usage
 authorization:
   allow_anonymous: true
-  identity_claim: ""
   policies:
     - name: "allow-all"
       description: "Allow all tools for local usage"

@@ -77,23 +77,28 @@ configMaps:
               - X-Excluded
             redacted_headers:
               - Authorization
-              - X-Validated-Jwt
       
           jwt:
             enabled: false
             validation:
-              strategy: "external"  # Values: 'local' or 'external'
-              # JWT forwarded by upstream proxy (Istio, etc.)
-              # Ref: https://istio.io/latest/docs/reference/config/security/request_authentication/#JWTRule-output_payload_to_header
-              forwarded_header: "X-Validated-Jwt"
-              local:
-                jwks_uri: &JwksUri "https://keycloak.example.com/realms/mcp-servers/protocol/openid-connect/certs"
-                cache_interval: "10s"
+              jwks_uri: &JwksUri "https://keycloak.example.com/realms/mcp-servers/protocol/openid-connect/certs"
+              cache_interval: "10s"
         
-                # CEL expressions to fine tune allowance. JWT payload is available under object 'payload'
-                allow_conditions: []
-                  #- expression: 'payload.groups.exists(group, group in ["admin", "editor"])'
-                  #- expression: 'has(payload.email) && payload.email.endsWith("@example.com")'
+              # CEL expressions to fine tune allowance. JWT payload is available under object 'payload'
+              allow_conditions: []
+                #- expression: 'payload.groups.exists(group, group in ["admin", "editor"])'
+                #- expression: 'has(payload.email) && payload.email.endsWith("@example.com")'
+
+          api_keys:
+            enabled: false
+            # keys:
+            #   - name: "ci-cd-pipeline"
+            #     token: "$CI_API_KEY"
+            #     payload:
+            #       sub: "ci-cd-service"
+            #       email: "ci@company.com"
+            #       groups:
+            #         - "ci-cd"
         
         # Oauth Authorization Server Configuration
         # Endpoint: /.well-known/oauth-authorization-server
@@ -166,7 +171,6 @@ configMaps:
         # Authorization Configuration
         authorization:
           allow_anonymous: true
-          identity_claim: "email"
           policies:
             - name: "allow-all"
               description: "Allow all operations (configure for production!)"

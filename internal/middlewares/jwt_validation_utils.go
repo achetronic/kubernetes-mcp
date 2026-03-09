@@ -69,7 +69,7 @@ func (mw *JWTValidationMiddleware) cacheJWKS() {
 		var jwks JWKS
 
 		//
-		resp, err := http.Get(mw.dependencies.AppCtx.Config.Middleware.JWT.Validation.Local.JWKSUri)
+		resp, err := http.Get(mw.dependencies.AppCtx.Config.Middleware.JWT.Validation.JWKSUri)
 		if err != nil {
 			mw.dependencies.AppCtx.Logger.Error("failed getting JWKS from remote", "error", err.Error())
 			goto haveANap
@@ -89,7 +89,7 @@ func (mw *JWTValidationMiddleware) cacheJWKS() {
 
 		// Don't be greedy, man
 	haveANap:
-		time.Sleep(mw.dependencies.AppCtx.Config.Middleware.JWT.Validation.Local.CacheInterval)
+		time.Sleep(mw.dependencies.AppCtx.Config.Middleware.JWT.Validation.CacheInterval)
 	}
 }
 
