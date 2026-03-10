@@ -65,10 +65,10 @@ func (m *Manager) handleGetLogs(ctx context.Context, request mcp.CallToolRequest
 
 	// Check authorization (real K8s resource: Pod)
 	if err := m.checkAuthorization(request, "get_logs", k8sContext, namespace, authorization.ResourceInfo{
-		Group:   "",
-		Version: "v1",
-		Kind:    "Pod",
-		Name:    name,
+		Group:    "",
+		Version:  "v1",
+		Resource: "pods",
+		Name:     name,
 	}); err != nil {
 		return errorResult(err), nil
 	}
@@ -140,10 +140,10 @@ func (m *Manager) handleExecCommand(ctx context.Context, request mcp.CallToolReq
 
 	// Check authorization (real K8s resource: Pod)
 	if err := m.checkAuthorization(request, "exec_command", k8sContext, namespace, authorization.ResourceInfo{
-		Group:   "",
-		Version: "v1",
-		Kind:    "Pod",
-		Name:    name,
+		Group:    "",
+		Version:  "v1",
+		Resource: "pods",
+		Name:     name,
 	}); err != nil {
 		return errorResult(err), nil
 	}
@@ -233,9 +233,9 @@ func (m *Manager) handleListEvents(ctx context.Context, request mcp.CallToolRequ
 
 	// Check authorization (real K8s resource: Event)
 	if err := m.checkAuthorization(request, "list_events", k8sContext, namespace, authorization.ResourceInfo{
-		Group:   "",
-		Version: "v1",
-		Kind:    "Event",
+		Group:    "",
+		Version:  "v1",
+		Resource: "events",
 	}); err != nil {
 		return errorResult(err), nil
 	}

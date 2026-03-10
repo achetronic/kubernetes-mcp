@@ -29,23 +29,23 @@ const (
 	// VirtualResourceGroup is the API group for MCP virtual resources
 	VirtualResourceGroup = "_"
 
-	// Virtual resource kinds
-	VirtualKindAPIDiscovery = "APIDiscovery"
-	VirtualKindClusterInfo  = "ClusterInfo"
-	VirtualKindContext      = "Context"
+	// Virtual resource kinds (used as resource names in GVR)
+	VirtualResourceAPIDiscovery = "apidiscovery"
+	VirtualResourceClusterInfo  = "clusterinfo"
+	VirtualResourceContext      = "contexts"
 )
 
 // ToolVirtualResources maps tools to their virtual resources
 var ToolVirtualResources = map[string]ResourceInfo{
-	"list_api_resources":  {Group: VirtualResourceGroup, Kind: VirtualKindAPIDiscovery},
-	"list_api_versions":   {Group: VirtualResourceGroup, Kind: VirtualKindAPIDiscovery},
-	"get_cluster_info":    {Group: VirtualResourceGroup, Kind: VirtualKindClusterInfo},
-	"get_current_context": {Group: VirtualResourceGroup, Kind: VirtualKindContext},
-	"list_contexts":       {Group: VirtualResourceGroup, Kind: VirtualKindContext},
-	"switch_context":      {Group: VirtualResourceGroup, Kind: VirtualKindContext},
+	"list_api_resources":  {Group: VirtualResourceGroup, Resource: VirtualResourceAPIDiscovery},
+	"list_api_versions":   {Group: VirtualResourceGroup, Resource: VirtualResourceAPIDiscovery},
+	"get_cluster_info":    {Group: VirtualResourceGroup, Resource: VirtualResourceClusterInfo},
+	"get_current_context": {Group: VirtualResourceGroup, Resource: VirtualResourceContext},
+	"list_contexts":       {Group: VirtualResourceGroup, Resource: VirtualResourceContext},
+	"switch_context":      {Group: VirtualResourceGroup, Resource: VirtualResourceContext},
 }
 
-// CompiledPolicy holds a policy with its precompiled CEL program
+// CompiledPolicy holds a policy with its precompiled CEL programs
 type CompiledPolicy struct {
 	Policy  api.AuthorizationPolicy
 	Program cel.Program
@@ -60,34 +60,23 @@ type Evaluator struct {
 
 // AuthzRequest represents the data available for authorization evaluation
 type AuthzRequest struct {
-	Payload   map[string]any // Authentication payload (JWT claims or API key payload)
-	Tool      string         // Tool being invoked
-	Context   string         // Kubernetes context
-	Namespace string         // Resource namespace (if applicable)
-	Resource  ResourceInfo   // Resource information
+	Payload   map[string]any
+	Tool      string
+	Context   string
+	Namespace string
+	Resource  ResourceInfo
 }
 
-// ResourceInfo holds information about the resource being accessed
+// ResourceInfo holds information about the resource being accessed (GVR)
 type ResourceInfo struct {
-	Group   string `json:"group"`
-	Version string `json:"version"`
-	Kind    string `json:"kind"`
-	Name    string `json:"name"`
-}
-
-// EffectivePermissions represents the computed permissions for a request
-type EffectivePermissions struct {
-	AllowedTools              map[string]bool
-	AllowedContexts           map[string]bool
-	AllowedResources          []api.ResourceRule
-	DeniedResources           []api.ResourceRule
-	AllowedLabelPrefixes      map[string]bool
-	AllowedAnnotationPrefixes map[string]bool
+	Group    string `json:"group"`
+	Version  string `json:"version"`
+	Resource string `json:"resource"`
+	Name     string `json:"name"`
 }
 
 // NewEvaluator creates a new authorization evaluator
 func NewEvaluator(config *api.AuthorizationConfig) (*Evaluator, error) {
-	// Create CEL environment with available variables
 	env, err := cel.NewEnv(
 		cel.Variable("payload", cel.DynType),
 		cel.Variable("tool", cel.StringType),
@@ -105,7 +94,6 @@ func NewEvaluator(config *api.AuthorizationConfig) (*Evaluator, error) {
 		compiledPolicies: make([]CompiledPolicy, 0, len(config.Policies)),
 	}
 
-	// Precompile all policies
 	for _, policy := range config.Policies {
 		ast, issues := env.Compile(policy.Match.Expression)
 		if issues != nil && issues.Err() != nil {
@@ -128,8 +116,7 @@ func NewEvaluator(config *api.AuthorizationConfig) (*Evaluator, error) {
 
 // GetResourceForTool returns the ResourceInfo for a tool, applying virtual resource mapping if needed
 func GetResourceForTool(tool string, resource ResourceInfo) ResourceInfo {
-	// If the tool has a virtual resource mapping and no real resource is provided, use the virtual one
-	if resource.Kind == "" {
+	if resource.Resource == "" {
 		if virtualRes, ok := ToolVirtualResources[tool]; ok {
 			return virtualRes
 		}
@@ -137,45 +124,40 @@ func GetResourceForTool(tool string, resource ResourceInfo) ResourceInfo {
 	return resource
 }
 
-// Evaluate evaluates all matching policies and returns whether the request is allowed
+// Evaluate evaluates all matching policies and returns whether the request is allowed.
+//
+// Algorithm:
+//  1. If no payload and anonymous not allowed -> deny
+//  2. Find all policies whose CEL match expression is true
+//  3. Collect all rules from matched policies
+//  4. If ANY deny rule matches the request -> deny
+//  5. If ANY allow rule matches the request -> allow
+//  6. Default: deny
 func (e *Evaluator) Evaluate(req AuthzRequest) (bool, error) {
-	// Check for anonymous access
 	if len(req.Payload) == 0 && !e.config.AllowAnonymous {
 		return false, nil
 	}
 
-	// Apply virtual resource mapping if needed
 	req.Resource = GetResourceForTool(req.Tool, req.Resource)
 
-	// Build CEL evaluation context
 	evalCtx := map[string]any{
 		"payload":   req.Payload,
 		"tool":      req.Tool,
 		"context":   req.Context,
 		"namespace": req.Namespace,
 		"resource": map[string]any{
-			"group":   req.Resource.Group,
-			"version": req.Resource.Version,
-			"kind":    req.Resource.Kind,
-			"name":    req.Resource.Name,
+			"group":    req.Resource.Group,
+			"version":  req.Resource.Version,
+			"resource": req.Resource.Resource,
+			"name":     req.Resource.Name,
 		},
 	}
 
-	// Find all matching policies and compute effective permissions
-	permissions := &EffectivePermissions{
-		AllowedTools:              make(map[string]bool),
-		AllowedContexts:           make(map[string]bool),
-		AllowedResources:          make([]api.ResourceRule, 0),
-		DeniedResources:           make([]api.ResourceRule, 0),
-		AllowedLabelPrefixes:      make(map[string]bool),
-		AllowedAnnotationPrefixes: make(map[string]bool),
-	}
+	var matchedRules []api.AuthorizationRule
 
 	for _, cp := range e.compiledPolicies {
-		// Evaluate match expression
 		out, _, err := cp.Program.Eval(evalCtx)
 		if err != nil {
-			// Expression evaluation error - skip this policy
 			continue
 		}
 
@@ -184,372 +166,171 @@ func (e *Evaluator) Evaluate(req AuthzRequest) (bool, error) {
 			continue
 		}
 
-		// Policy matched - compute effective permissions (allow - deny)
-		e.applyPolicyPermissions(cp.Policy, permissions)
+		matchedRules = append(matchedRules, cp.Policy.Rules...)
 	}
 
-	// Check if the request is allowed
-	return e.isRequestAllowed(permissions, req), nil
+	if len(matchedRules) == 0 {
+		return false, nil
+	}
+
+	// Deny takes priority: if any deny rule matches, deny
+	for _, rule := range matchedRules {
+		if rule.Effect == api.RuleEffectDeny && ruleMatchesRequest(rule, req) {
+			return false, nil
+		}
+	}
+
+	// Check if any allow rule matches
+	for _, rule := range matchedRules {
+		if rule.Effect == api.RuleEffectAllow && ruleMatchesRequest(rule, req) {
+			return true, nil
+		}
+	}
+
+	return false, nil
 }
 
-// applyPolicyPermissions applies a policy's allow and deny rules to the effective permissions
-func (e *Evaluator) applyPolicyPermissions(policy api.AuthorizationPolicy, perms *EffectivePermissions) {
-	// Apply allow rules
-	if policy.Allow != nil {
-		e.applyAllowRules(policy.Allow, perms)
-	}
-
-	// Apply deny rules
-	if policy.Deny != nil {
-		e.applyDenyRules(policy.Deny, perms)
-	}
-}
-
-// applyAllowRules applies allow rules to permissions
-func (e *Evaluator) applyAllowRules(rule *api.ToolContextRule, perms *EffectivePermissions) {
-	for _, tool := range rule.Tools {
-		if tool == "*" {
-			perms.AllowedTools["*"] = true
-		} else {
-			perms.AllowedTools[tool] = true
-		}
-	}
-
-	for _, ctx := range rule.Contexts {
-		if ctx == "*" {
-			perms.AllowedContexts["*"] = true
-		} else {
-			perms.AllowedContexts[ctx] = true
-		}
-	}
-
-	// Collect allowed resources
-	perms.AllowedResources = append(perms.AllowedResources, rule.Resources...)
-
-	for _, prefix := range rule.LabelPrefixes {
-		if prefix == "*" {
-			perms.AllowedLabelPrefixes["*"] = true
-		} else {
-			perms.AllowedLabelPrefixes[prefix] = true
-		}
-	}
-
-	for _, prefix := range rule.AnnotationPrefixes {
-		if prefix == "*" {
-			perms.AllowedAnnotationPrefixes["*"] = true
-		} else {
-			perms.AllowedAnnotationPrefixes[prefix] = true
-		}
-	}
-}
-
-// applyDenyRules applies deny rules to permissions
-func (e *Evaluator) applyDenyRules(rule *api.ToolContextRule, perms *EffectivePermissions) {
-	// Collect denied resources
-	perms.DeniedResources = append(perms.DeniedResources, rule.Resources...)
-
-	// For tools and contexts, remove from allowed if explicitly denied
-	for _, tool := range rule.Tools {
-		if tool == "*" {
-			// Deny all - clear allowed tools except keep track of wildcard deny
-			perms.AllowedTools = make(map[string]bool)
-			perms.AllowedTools["_denied_*"] = true
-		} else {
-			delete(perms.AllowedTools, tool)
-		}
-	}
-
-	for _, ctx := range rule.Contexts {
-		if ctx == "*" {
-			perms.AllowedContexts = make(map[string]bool)
-			perms.AllowedContexts["_denied_*"] = true
-		} else {
-			delete(perms.AllowedContexts, ctx)
-		}
-	}
-}
-
-// isRequestAllowed checks if the request is allowed based on effective permissions
-func (e *Evaluator) isRequestAllowed(perms *EffectivePermissions, req AuthzRequest) bool {
-	// Check for wildcard deny
-	if perms.AllowedTools["_denied_*"] || perms.AllowedContexts["_denied_*"] {
+// ruleMatchesRequest checks if a rule matches the given request
+func ruleMatchesRequest(rule api.AuthorizationRule, req AuthzRequest) bool {
+	if !matchesTool(rule.Tools, req.Tool) {
 		return false
 	}
 
-	// Check tool
-	if !perms.AllowedTools["*"] && !perms.AllowedTools[req.Tool] {
+	if !matchesContext(rule.Contexts, req.Context) {
 		return false
 	}
 
-	// Check context
-	if !perms.AllowedContexts["*"] && !perms.AllowedContexts[req.Context] {
-		return false
-	}
-
-	// Check resources
-	if !e.isResourceAllowed(perms, req.Resource, req.Namespace) {
+	if !matchesResources(rule.Resources, req.Resource, req.Namespace) {
 		return false
 	}
 
 	return true
 }
 
-// isResourceAllowed checks if the resource is allowed based on allow/deny rules
-func (e *Evaluator) isResourceAllowed(perms *EffectivePermissions, resource ResourceInfo, namespace string) bool {
-	// If no resource rules are defined, allow all resources
-	if len(perms.AllowedResources) == 0 && len(perms.DeniedResources) == 0 {
+// matchesTool checks if a tool name matches any pattern in the list.
+// Empty list matches everything. Supports glob patterns.
+func matchesTool(patterns []string, tool string) bool {
+	if len(patterns) == 0 {
 		return true
 	}
-
-	// First check if explicitly denied (deny wins over allow)
-	if len(perms.DeniedResources) > 0 && matchesResourceRules(perms.DeniedResources, resource, namespace) {
-		return false
-	}
-
-	// If no allow rules, but there are deny rules and we passed them, allow
-	if len(perms.AllowedResources) == 0 {
-		return true
-	}
-
-	// Check if allowed by at least one rule
-	return matchesResourceRules(perms.AllowedResources, resource, namespace)
-}
-
-// matchesResourceRules checks if a resource matches any of the rules
-func matchesResourceRules(rules []api.ResourceRule, resource ResourceInfo, namespace string) bool {
-	for _, rule := range rules {
-		if matchesResourceRule(rule, resource, namespace) {
-			return true
-		}
-	}
-	return false
-}
-
-// matchesResourceRule checks if a resource matches a single rule
-func matchesResourceRule(rule api.ResourceRule, resource ResourceInfo, namespace string) bool {
-	// Check groups
-	if len(rule.Groups) > 0 && !matchesList(rule.Groups, resource.Group) {
-		return false
-	}
-
-	// Check versions
-	if len(rule.Versions) > 0 && !matchesList(rule.Versions, resource.Version) {
-		return false
-	}
-
-	// Check kinds
-	if len(rule.Kinds) > 0 && !matchesList(rule.Kinds, resource.Kind) {
-		return false
-	}
-
-	// Check namespaces (with wildcard support)
-	if len(rule.Namespaces) > 0 && !matchesWildcardList(rule.Namespaces, namespace) {
-		return false
-	}
-
-	// Check names (with wildcard support)
-	if len(rule.Names) > 0 && !matchesWildcardList(rule.Names, resource.Name) {
-		return false
-	}
-
-	return true
-}
-
-// matchesList checks if value matches any item in list (supports "*" wildcard)
-func matchesList(list []string, value string) bool {
-	for _, item := range list {
-		if item == "*" || item == value {
-			return true
-		}
-	}
-	return false
-}
-
-// matchesWildcardList checks if value matches any pattern in the list
-func matchesWildcardList(patterns []string, value string) bool {
 	for _, pattern := range patterns {
-		if matchesWildcard(pattern, value) {
+		if globMatch(pattern, tool) {
 			return true
 		}
 	}
 	return false
 }
 
-// matchesWildcard checks if a value matches a wildcard pattern
-// Supports: "*" (all), "prefix-*", "*-suffix", "*-middle-*"
-func matchesWildcard(pattern, value string) bool {
-	// Exact match or wildcard all
-	if pattern == "*" || pattern == value {
+// matchesContext checks if a context matches any pattern in the list.
+// Empty list matches everything. Supports glob patterns.
+func matchesContext(patterns []string, ctx string) bool {
+	if len(patterns) == 0 {
 		return true
 	}
-
-	// Handle patterns with wildcards
-	if strings.Contains(pattern, "*") {
-		parts := strings.Split(pattern, "*")
-
-		// Single wildcard cases
-		if len(parts) == 2 {
-			prefix := parts[0]
-			suffix := parts[1]
-
-			// "prefix-*" pattern
-			if suffix == "" {
-				return strings.HasPrefix(value, prefix)
-			}
-
-			// "*-suffix" pattern
-			if prefix == "" {
-				return strings.HasSuffix(value, suffix)
-			}
-
-			// "prefix-*-suffix" pattern
-			return strings.HasPrefix(value, prefix) && strings.HasSuffix(value, suffix) && len(value) >= len(prefix)+len(suffix)
-		}
-
-		// Multiple wildcards: "*-middle-*" pattern
-		if len(parts) == 3 && parts[0] == "" && parts[2] == "" {
-			return strings.Contains(value, parts[1])
+	for _, pattern := range patterns {
+		if globMatch(pattern, ctx) {
+			return true
 		}
 	}
-
 	return false
 }
 
-// IsLabelPrefixAllowed checks if a label prefix is allowed
-func (e *Evaluator) IsLabelPrefixAllowed(req AuthzRequest, labelKey string) (bool, error) {
-	// Build CEL evaluation context
-	evalCtx := map[string]any{
-		"payload":   req.Payload,
-		"tool":      req.Tool,
-		"context":   req.Context,
-		"namespace": req.Namespace,
-		"resource": map[string]any{
-			"group":   req.Resource.Group,
-			"version": req.Resource.Version,
-			"kind":    req.Resource.Kind,
-			"name":    req.Resource.Name,
-		},
+// matchesResources checks if a resource matches the resource rules.
+// Empty resource list means the rule applies to all resources.
+func matchesResources(rules []api.ResourceRule, resource ResourceInfo, namespace string) bool {
+	if len(rules) == 0 {
+		return true
 	}
-
-	allowedPrefixes := make(map[string]bool)
-	deniedPrefixes := make(map[string]bool)
-
-	for _, cp := range e.compiledPolicies {
-		out, _, err := cp.Program.Eval(evalCtx)
-		if err != nil {
-			continue
-		}
-
-		matched, ok := out.Value().(bool)
-		if !ok || !matched {
-			continue
-		}
-
-		// Collect allowed prefixes
-		if cp.Policy.Allow != nil {
-			for _, prefix := range cp.Policy.Allow.LabelPrefixes {
-				allowedPrefixes[prefix] = true
-			}
-		}
-
-		// Collect denied prefixes (only affects this policy's contribution)
-		if cp.Policy.Deny != nil {
-			for _, prefix := range cp.Policy.Deny.LabelPrefixes {
-				deniedPrefixes[prefix] = true
-			}
+	for _, rule := range rules {
+		if matchesSingleResourceRule(rule, resource, namespace) {
+			return true
 		}
 	}
-
-	// Wildcard allows everything
-	if allowedPrefixes["*"] {
-		// Check if specifically denied
-		for prefix := range deniedPrefixes {
-			if strings.HasPrefix(labelKey, prefix) {
-				// Check if another policy allows it
-				for allowedPrefix := range allowedPrefixes {
-					if allowedPrefix != "*" && strings.HasPrefix(labelKey, allowedPrefix) {
-						return true, nil
-					}
-				}
-				return false, nil
-			}
-		}
-		return true, nil
-	}
-
-	// Check if any allowed prefix matches
-	for prefix := range allowedPrefixes {
-		if strings.HasPrefix(labelKey, prefix) {
-			return true, nil
-		}
-	}
-
-	return false, nil
+	return false
 }
 
-// IsAnnotationPrefixAllowed checks if an annotation prefix is allowed
-func (e *Evaluator) IsAnnotationPrefixAllowed(req AuthzRequest, annotationKey string) (bool, error) {
-	// Same logic as labels
-	evalCtx := map[string]any{
-		"payload":   req.Payload,
-		"tool":      req.Tool,
-		"context":   req.Context,
-		"namespace": req.Namespace,
-		"resource": map[string]any{
-			"group":   req.Resource.Group,
-			"version": req.Resource.Version,
-			"kind":    req.Resource.Kind,
-			"name":    req.Resource.Name,
-		},
+// matchesSingleResourceRule checks if a resource matches a single ResourceRule
+func matchesSingleResourceRule(rule api.ResourceRule, resource ResourceInfo, namespace string) bool {
+	if len(rule.Groups) > 0 && !matchesGlobList(rule.Groups, resource.Group) {
+		return false
 	}
 
-	allowedPrefixes := make(map[string]bool)
-	deniedPrefixes := make(map[string]bool)
-
-	for _, cp := range e.compiledPolicies {
-		out, _, err := cp.Program.Eval(evalCtx)
-		if err != nil {
-			continue
-		}
-
-		matched, ok := out.Value().(bool)
-		if !ok || !matched {
-			continue
-		}
-
-		if cp.Policy.Allow != nil {
-			for _, prefix := range cp.Policy.Allow.AnnotationPrefixes {
-				allowedPrefixes[prefix] = true
-			}
-		}
-
-		if cp.Policy.Deny != nil {
-			for _, prefix := range cp.Policy.Deny.AnnotationPrefixes {
-				deniedPrefixes[prefix] = true
-			}
-		}
+	if len(rule.Versions) > 0 && !matchesGlobList(rule.Versions, resource.Version) {
+		return false
 	}
 
-	if allowedPrefixes["*"] {
-		for prefix := range deniedPrefixes {
-			if strings.HasPrefix(annotationKey, prefix) {
-				for allowedPrefix := range allowedPrefixes {
-					if allowedPrefix != "*" && strings.HasPrefix(annotationKey, allowedPrefix) {
-						return true, nil
-					}
-				}
-				return false, nil
-			}
-		}
-		return true, nil
+	if len(rule.Resources) > 0 && !matchesGlobList(rule.Resources, resource.Resource) {
+		return false
 	}
 
-	for prefix := range allowedPrefixes {
-		if strings.HasPrefix(annotationKey, prefix) {
-			return true, nil
-		}
+	if len(rule.Namespaces) > 0 && !matchesGlobList(rule.Namespaces, namespace) {
+		return false
 	}
 
-	return false, nil
+	if len(rule.Names) > 0 && !matchesGlobList(rule.Names, resource.Name) {
+		return false
+	}
+
+	return true
 }
 
+// matchesGlobList checks if a value matches any glob pattern in the list
+func matchesGlobList(patterns []string, value string) bool {
+	for _, pattern := range patterns {
+		if globMatch(pattern, value) {
+			return true
+		}
+	}
+	return false
+}
+
+// globMatch performs glob-style pattern matching.
+// Supports:
+//   - "*" matches everything
+//   - "prefix*" matches strings starting with prefix
+//   - "*suffix" matches strings ending with suffix
+//   - "pre*suf" matches strings starting with pre and ending with suf
+//   - "a*b*c" matches with multiple wildcards
+//   - Exact match when no wildcards present
+func globMatch(pattern, value string) bool {
+	if pattern == "*" {
+		return true
+	}
+	if !strings.Contains(pattern, "*") {
+		return pattern == value
+	}
+	return deepGlobMatch(pattern, value)
+}
+
+// deepGlobMatch handles complex glob patterns with multiple wildcards
+// using a simple recursive approach with memoization-friendly structure
+func deepGlobMatch(pattern, value string) bool {
+	for len(pattern) > 0 {
+		if pattern[0] == '*' {
+			// Skip consecutive stars
+			for len(pattern) > 0 && pattern[0] == '*' {
+				pattern = pattern[1:]
+			}
+			// Trailing star matches everything
+			if len(pattern) == 0 {
+				return true
+			}
+			// Try matching the rest of the pattern at every position
+			for i := 0; i <= len(value); i++ {
+				if deepGlobMatch(pattern, value[i:]) {
+					return true
+				}
+			}
+			return false
+		}
+
+		if len(value) == 0 || pattern[0] != value[0] {
+			return false
+		}
+
+		pattern = pattern[1:]
+		value = value[1:]
+	}
+
+	return len(value) == 0
+}

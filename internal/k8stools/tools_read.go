@@ -52,10 +52,10 @@ func (m *Manager) handleGetResource(ctx context.Context, request mcp.CallToolReq
 
 	// Check authorization
 	if err := m.checkAuthorization(request, "get_resource", k8sContext, namespace, authorization.ResourceInfo{
-		Group:   group,
-		Version: version,
-		Kind:    kind,
-		Name:    name,
+		Group:    group,
+		Version:  version,
+		Resource: kindToResource(kind),
+		Name:     name,
 	}); err != nil {
 		return errorResult(err), nil
 	}
@@ -123,9 +123,9 @@ func (m *Manager) handleListResources(ctx context.Context, request mcp.CallToolR
 
 	// Check authorization
 	if err := m.checkAuthorization(request, "list_resources", k8sContext, namespace, authorization.ResourceInfo{
-		Group:   group,
-		Version: version,
-		Kind:    kind,
+		Group:    group,
+		Version:  version,
+		Resource: kindToResource(kind),
 	}); err != nil {
 		return errorResult(err), nil
 	}
@@ -194,10 +194,10 @@ func (m *Manager) handleDescribeResource(ctx context.Context, request mcp.CallTo
 
 	// Check authorization
 	if err := m.checkAuthorization(request, "describe_resource", k8sContext, namespace, authorization.ResourceInfo{
-		Group:   group,
-		Version: version,
-		Kind:    kind,
-		Name:    name,
+		Group:    group,
+		Version:  version,
+		Resource: kindToResource(kind),
+		Name:     name,
 	}); err != nil {
 		return errorResult(err), nil
 	}

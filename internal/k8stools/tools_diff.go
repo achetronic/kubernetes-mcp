@@ -61,10 +61,10 @@ func (m *Manager) handleDiffManifest(ctx context.Context, request mcp.CallToolRe
 
 	// Check authorization
 	if err := m.checkAuthorization(request, "diff_manifest", k8sContext, namespace, authorization.ResourceInfo{
-		Group:   gvk.Group,
-		Version: gvk.Version,
-		Kind:    gvk.Kind,
-		Name:    name,
+		Group:    gvk.Group,
+		Version:  gvk.Version,
+		Resource: kindToResource(gvk.Kind),
+		Name:     name,
 	}); err != nil {
 		return errorResult(err), nil
 	}

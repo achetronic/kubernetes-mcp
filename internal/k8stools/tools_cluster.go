@@ -46,8 +46,8 @@ func (m *Manager) handleListAPIResources(ctx context.Context, request mcp.CallTo
 
 	// Check authorization (virtual resource: _/APIDiscovery)
 	if err := m.checkAuthorization(request, "list_api_resources", k8sContext, "", authorization.ResourceInfo{
-		Group: authorization.VirtualResourceGroup,
-		Kind:  authorization.VirtualKindAPIDiscovery,
+		Group:    authorization.VirtualResourceGroup,
+		Resource: authorization.VirtualResourceAPIDiscovery,
 	}); err != nil {
 		return errorResult(err), nil
 	}
@@ -143,8 +143,8 @@ func (m *Manager) handleListAPIVersions(ctx context.Context, request mcp.CallToo
 
 	// Check authorization (virtual resource: _/APIDiscovery)
 	if err := m.checkAuthorization(request, "list_api_versions", k8sContext, "", authorization.ResourceInfo{
-		Group: authorization.VirtualResourceGroup,
-		Kind:  authorization.VirtualKindAPIDiscovery,
+		Group:    authorization.VirtualResourceGroup,
+		Resource: authorization.VirtualResourceAPIDiscovery,
 	}); err != nil {
 		return errorResult(err), nil
 	}
@@ -188,8 +188,8 @@ func (m *Manager) handleGetClusterInfo(ctx context.Context, request mcp.CallTool
 
 	// Check authorization (virtual resource: _/ClusterInfo)
 	if err := m.checkAuthorization(request, "get_cluster_info", k8sContext, "", authorization.ResourceInfo{
-		Group: authorization.VirtualResourceGroup,
-		Kind:  authorization.VirtualKindClusterInfo,
+		Group:    authorization.VirtualResourceGroup,
+		Resource: authorization.VirtualResourceClusterInfo,
 	}); err != nil {
 		return errorResult(err), nil
 	}
@@ -258,9 +258,9 @@ func (m *Manager) handleListNamespaces(ctx context.Context, request mcp.CallTool
 
 	// Check authorization (real K8s resource: Namespace)
 	if err := m.checkAuthorization(request, "list_namespaces", k8sContext, "", authorization.ResourceInfo{
-		Group:   "",
-		Version: "v1",
-		Kind:    "Namespace",
+		Group:    "",
+		Version:  "v1",
+		Resource: "namespaces",
 	}); err != nil {
 		return errorResult(err), nil
 	}

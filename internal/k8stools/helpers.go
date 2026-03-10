@@ -104,28 +104,30 @@ func (m *Manager) applyYQExpressions(yamlData string, args map[string]any) (stri
 	return m.yq.Evaluate(yamlData, expressions)
 }
 
+// kindToResource converts a Kind name to the plural lowercase resource name
+func kindToResource(kind string) string {
+	resource := strings.ToLower(kind)
+	switch resource {
+	case "ingress":
+		return "ingresses"
+	case "networkpolicy":
+		return "networkpolicies"
+	case "endpoints":
+		return "endpoints"
+	default:
+		if !strings.HasSuffix(resource, "s") {
+			resource += "s"
+		}
+		return resource
+	}
+}
+
 // getGVR builds a GroupVersionResource from parameters
 func getGVR(group, version, kind string) schema.GroupVersionResource {
-	// Convert kind to resource (lowercase plural)
-	// This is a simplified conversion - in practice you might want to use discovery
-	resource := strings.ToLower(kind)
-	if !strings.HasSuffix(resource, "s") {
-		resource += "s"
-	}
-	// Handle special cases
-	switch strings.ToLower(kind) {
-	case "ingress":
-		resource = "ingresses"
-	case "networkpolicy":
-		resource = "networkpolicies"
-	case "endpoints":
-		resource = "endpoints"
-	}
-
 	return schema.GroupVersionResource{
 		Group:    group,
 		Version:  version,
-		Resource: resource,
+		Resource: kindToResource(kind),
 	}
 }
 

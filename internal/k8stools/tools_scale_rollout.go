@@ -60,10 +60,10 @@ func (m *Manager) handleScaleResource(ctx context.Context, request mcp.CallToolR
 
 	// Check authorization
 	if err := m.checkAuthorization(request, "scale_resource", k8sContext, namespace, authorization.ResourceInfo{
-		Group:   group,
-		Version: version,
-		Kind:    kind,
-		Name:    name,
+		Group:    group,
+		Version:  version,
+		Resource: kindToResource(kind),
+		Name:     name,
 	}); err != nil {
 		return errorResult(err), nil
 	}
@@ -133,10 +133,10 @@ func (m *Manager) handleGetRolloutStatus(ctx context.Context, request mcp.CallTo
 
 	// Check authorization
 	if err := m.checkAuthorization(request, "get_rollout_status", k8sContext, namespace, authorization.ResourceInfo{
-		Group:   group,
-		Version: version,
-		Kind:    kind,
-		Name:    name,
+		Group:    group,
+		Version:  version,
+		Resource: kindToResource(kind),
+		Name:     name,
 	}); err != nil {
 		return errorResult(err), nil
 	}
@@ -230,10 +230,10 @@ func (m *Manager) handleRestartRollout(ctx context.Context, request mcp.CallTool
 
 	// Check authorization
 	if err := m.checkAuthorization(request, "restart_rollout", k8sContext, namespace, authorization.ResourceInfo{
-		Group:   group,
-		Version: version,
-		Kind:    kind,
-		Name:    name,
+		Group:    group,
+		Version:  version,
+		Resource: kindToResource(kind),
+		Name:     name,
 	}); err != nil {
 		return errorResult(err), nil
 	}
@@ -306,10 +306,10 @@ func (m *Manager) handleUndoRollout(ctx context.Context, request mcp.CallToolReq
 
 	// Check authorization
 	if err := m.checkAuthorization(request, "undo_rollout", k8sContext, namespace, authorization.ResourceInfo{
-		Group:   group,
-		Version: version,
-		Kind:    kind,
-		Name:    name,
+		Group:    group,
+		Version:  version,
+		Resource: kindToResource(kind),
+		Name:     name,
 	}); err != nil {
 		return errorResult(err), nil
 	}

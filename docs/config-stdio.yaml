@@ -42,13 +42,12 @@ authorization:
       description: "Allow all tools for local usage"
       match:
         expression: "true"
-      allow:
-        tools: ["*"]
-        contexts: ["*"]
-        resources:
-          # All real K8s resources
-          - groups: ["*"]
-            kinds: ["*"]
-          # All virtual MCP resources
-          - groups: ["_"]
-            kinds: ["*"]
+      rules:
+        - effect: allow
+          tools: ["*"]
+          contexts: ["*"]
+          resources:
+            - groups: ["*"]
+              resources: ["*"]
+            - groups: ["_"]
+              resources: ["*"]

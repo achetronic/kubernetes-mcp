@@ -52,10 +52,10 @@ func (m *Manager) handleCheckPermission(ctx context.Context, request mcp.CallToo
 
 	// Check authorization (real K8s resource: SelfSubjectAccessReview)
 	if err := m.checkAuthorization(request, "check_permission", k8sContext, namespace, authorization.ResourceInfo{
-		Group:   "authorization.k8s.io",
-		Version: "v1",
-		Kind:    "SelfSubjectAccessReview",
-		Name:    name,
+		Group:    "authorization.k8s.io",
+		Version:  "v1",
+		Resource: "selfsubjectaccessreviews",
+		Name:     name,
 	}); err != nil {
 		return errorResult(err), nil
 	}
@@ -126,10 +126,10 @@ func (m *Manager) handleGetPodMetrics(ctx context.Context, request mcp.CallToolR
 
 	// Check authorization (real K8s resource: PodMetrics)
 	if err := m.checkAuthorization(request, "get_pod_metrics", k8sContext, namespace, authorization.ResourceInfo{
-		Group:   "metrics.k8s.io",
-		Version: "v1beta1",
-		Kind:    "PodMetrics",
-		Name:    name,
+		Group:    "metrics.k8s.io",
+		Version:  "v1beta1",
+		Resource: "podmetrics",
+		Name:     name,
 	}); err != nil {
 		return errorResult(err), nil
 	}
@@ -204,10 +204,10 @@ func (m *Manager) handleGetNodeMetrics(ctx context.Context, request mcp.CallTool
 
 	// Check authorization (real K8s resource: NodeMetrics)
 	if err := m.checkAuthorization(request, "get_node_metrics", k8sContext, "", authorization.ResourceInfo{
-		Group:   "metrics.k8s.io",
-		Version: "v1beta1",
-		Kind:    "NodeMetrics",
-		Name:    name,
+		Group:    "metrics.k8s.io",
+		Version:  "v1beta1",
+		Resource: "nodemetrics",
+		Name:     name,
 	}); err != nil {
 		return errorResult(err), nil
 	}

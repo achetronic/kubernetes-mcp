@@ -35,8 +35,8 @@ func (m *Manager) registerGetCurrentContext() {
 func (m *Manager) handleGetCurrentContext(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	// Check authorization (virtual resource: _/Context)
 	if err := m.checkAuthorization(request, "get_current_context", "", "", authorization.ResourceInfo{
-		Group: authorization.VirtualResourceGroup,
-		Kind:  authorization.VirtualKindContext,
+		Group:    authorization.VirtualResourceGroup,
+		Resource: authorization.VirtualResourceContext,
 	}); err != nil {
 		return errorResult(err), nil
 	}
@@ -70,8 +70,8 @@ func (m *Manager) handleListContexts(ctx context.Context, request mcp.CallToolRe
 
 	// Check authorization (virtual resource: _/Context)
 	if err := m.checkAuthorization(request, "list_contexts", "", "", authorization.ResourceInfo{
-		Group: authorization.VirtualResourceGroup,
-		Kind:  authorization.VirtualKindContext,
+		Group:    authorization.VirtualResourceGroup,
+		Resource: authorization.VirtualResourceContext,
 	}); err != nil {
 		return errorResult(err), nil
 	}
@@ -124,8 +124,8 @@ func (m *Manager) handleSwitchContext(ctx context.Context, request mcp.CallToolR
 
 	// Check authorization for both the tool and the target context (virtual resource: _/Context)
 	if err := m.checkAuthorization(request, "switch_context", contextName, "", authorization.ResourceInfo{
-		Group: authorization.VirtualResourceGroup,
-		Kind:  authorization.VirtualKindContext,
+		Group:    authorization.VirtualResourceGroup,
+		Resource: authorization.VirtualResourceContext,
 	}); err != nil {
 		return errorResult(err), nil
 	}

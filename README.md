@@ -62,40 +62,7 @@ Behind the scenes, the AI chains multiple yq expressions to filter and transform
 <details>
 <summary><strong>🔐 Advanced RBAC</strong></summary>
 
-Fine-grained access control — filter by **tools**, **contexts**, **API groups**, **kinds**, **namespaces**, and **resource names**:
-
-```yaml
-authorization:
-  policies:
-    # SRE team: full access everywhere
-    - name: "sre-admins"
-      match:
-        expression: 'payload.groups.exists(g, g == "sre-team")'
-      allow:
-        tools: ["*"]
-        contexts: ["*"]
-        resources:
-          - groups: ["*"]
-            kinds: ["*"]
-
-    # Developers: read-only, no secrets, only their namespaces
-    - name: "developers-limited"
-      match:
-        expression: 'payload.groups.exists(g, g == "developers")'
-      allow:
-        tools: ["get_*", "list_*", "describe_*"]
-        contexts: ["*"]
-        resources:
-          - groups: ["", "apps", "networking.k8s.io"]
-            kinds: ["*"]
-            namespaces: ["team-*"]
-      deny:
-        resources:
-          - groups: [""]
-            kinds: ["Secret"]
-          - groups: ["rbac.authorization.k8s.io"]
-            kinds: ["*"]
-```
+Fine-grained access control with rules-based policies — filter by **tools**, **contexts**, **API groups**, **resources** (plural GVR), **namespaces**, and **resource names**. Deny always wins, default deny, full glob support. See [Authorization](#authorization-policy-evaluation) for details and examples.
 
 </details>
 
@@ -186,9 +153,15 @@ authorization:
     - name: "allow-all"
       match:
         expression: "true"
-      allow:
-        tools: ["*"]
-        contexts: ["*"]
+      rules:
+        - effect: allow
+          tools: ["*"]
+          contexts: ["*"]
+          resources:
+            - groups: ["*"]
+              resources: ["*"]
+            - groups: ["_"]
+              resources: ["*"]
 ```
 
 **3. Configure Claude Desktop:**
@@ -241,9 +214,15 @@ authorization:
     - name: "allow-all"
       match:
         expression: "true"
-      allow:
-        tools: ["*"]
-        contexts: ["*"]
+      rules:
+        - effect: allow
+          tools: ["*"]
+          contexts: ["*"]
+          resources:
+            - groups: ["*"]
+              resources: ["*"]
+            - groups: ["_"]
+              resources: ["*"]
 ```
 
 **2. Run with Docker:**
@@ -373,20 +352,30 @@ authorization:
       description: "SRE team has full access"
       match:
         expression: 'payload.groups.exists(g, g == "sre-team")'
-      allow:
-        tools: ["*"]
-        contexts: ["*"]
+      rules:
+        - effect: allow
+          tools: ["*"]
+          contexts: ["*"]
+          resources:
+            - groups: ["*"]
+              resources: ["*"]
+            - groups: ["_"]
+              resources: ["*"]
 
     - name: "developers-limited"
       description: "Developers: full in staging, read-only in prod"
       match:
         expression: 'payload.groups.exists(g, g == "developers")'
-      allow:
-        tools: ["*"]
-        contexts: ["staging"]
-      deny:
-        tools: ["delete_resource", "delete_resources", "exec_command"]
-        contexts: ["production"]
+      rules:
+        - effect: allow
+          tools: ["*"]
+          contexts: ["staging"]
+          resources:
+            - groups: ["*"]
+              resources: ["*"]
+        - effect: deny
+          tools: ["delete_resource", "delete_resources", "exec_command"]
+          contexts: ["production"]
 ```
 
 ### Environment Variables
@@ -470,18 +459,18 @@ it falls through to API key matching. If neither succeeds, the request proceeds 
 
 ### Authorization Policy Evaluation
 
-1. If authentication enabled and no valid token → **deny** (unless `allow_anonymous: true`)
-2. Find **all** policies whose `match` expression is true
-3. For each policy: `effective = allow - deny`
-4. Final result: **union** of all effective permissions
-5. If result allows `tool + context + resource` → **allow**
+1. If no payload and anonymous not allowed → **deny**
+2. Find **all** policies whose `match` CEL expression is true
+3. Collect **all rules** from matched policies into a flat list
+4. If **ANY deny rule** matches the request → **deny** (deny always wins)
+5. If **ANY allow rule** matches the request → **allow**
 6. Default: **deny**
 
-**Most permissive wins**: If a user matches multiple policies, they get the union of all permissions.
+**Deny takes priority**: A deny rule always overrides an allow rule, regardless of which policy it comes from. Omitting a tool from all allow rules also denies it (default deny).
 
 ### Resource-Level Authorization
 
-Control access by **API group**, **kind**, **namespace**, and **name**.
+Control access by **API group**, **resource** (plural lowercase GVR), **namespace**, and **name**.
 
 #### Reference
 
@@ -489,11 +478,11 @@ Control access by **API group**, **kind**, **namespace**, and **name**.
 |-------|---------|----------------------|
 | `groups` | `[""]` (core), `["apps"]`, `["_"]` (virtual) | Any group |
 | `versions` | `["v1"]`, `["v1beta1"]` | Any version |
-| `kinds` | `["Pod", "Secret"]` | Any kind |
+| `resources` | `["pods", "secrets"]` | Any resource |
 | `namespaces` | `["default"]`, `["team-*"]`, `[""]` (cluster-scoped) | Any namespace + cluster-scoped |
 | `names` | `["myapp-*"]`, `["*-config"]` | Any name |
 
-> **Tip**: Omit `versions` unless you need to target a specific API version. Omitting it matches all versions.
+> **Tip**: Resources use plural lowercase form matching Kubernetes GVR (e.g. `pods`, `deployments`, `configmaps`). Omit `versions` unless you need a specific API version.
 
 #### Wildcards
 
@@ -509,29 +498,26 @@ Control access by **API group**, **kind**, **namespace**, and **name**.
 - name: "all-except-sensitive"
   match:
     expression: "true"
-  allow:
-    tools: ["*"]
-    contexts: ["*"]
-    resources:
-      - groups: ["*"]
-        kinds: ["*"]
-      - groups: ["_"]
-        kinds: ["*"]
-  deny:
-    resources:
-      # Secrets
-      - groups: [""]
-        kinds: ["Secret"]
-      # RBAC
-      - groups: ["rbac.authorization.k8s.io"]
-        kinds: ["*"]
-      # Certificates
-      - groups: ["certificates.k8s.io"]
-        kinds: ["*"]
-      # System namespaces
-      - groups: ["*"]
-        kinds: ["*"]
-        namespaces: ["kube-system", "kube-public"]
+  rules:
+    - effect: allow
+      tools: ["*"]
+      contexts: ["*"]
+      resources:
+        - groups: ["*"]
+          resources: ["*"]
+        - groups: ["_"]
+          resources: ["*"]
+    - effect: deny
+      resources:
+        - groups: [""]
+          resources: ["secrets"]
+        - groups: ["rbac.authorization.k8s.io"]
+          resources: ["*"]
+        - groups: ["certificates.k8s.io"]
+          resources: ["*"]
+        - groups: ["*"]
+          resources: ["*"]
+          namespaces: ["kube-system", "kube-public"]
 ```
 
 #### Example: Block Secrets
@@ -540,16 +526,17 @@ Control access by **API group**, **kind**, **namespace**, and **name**.
 - name: "no-secrets"
   match:
     expression: "true"
-  allow:
-    tools: ["*"]
-    contexts: ["*"]
-    resources:
-      - groups: ["*"]
-        kinds: ["*"]
-  deny:
-    resources:
-      - groups: [""]
-        kinds: ["Secret"]
+  rules:
+    - effect: allow
+      tools: ["*"]
+      contexts: ["*"]
+      resources:
+        - groups: ["*"]
+          resources: ["*"]
+    - effect: deny
+      resources:
+        - groups: [""]
+          resources: ["secrets"]
 ```
 
 #### Example: Read-only, no sensitive resources
@@ -558,18 +545,20 @@ Control access by **API group**, **kind**, **namespace**, and **name**.
 - name: "read-only-safe"
   match:
     expression: '"developers" in payload.groups'
-  allow:
-    tools: ["get_resource", "list_resources", "describe_resource", "get_logs"]
-    contexts: ["*"]
-    resources:
-      - groups: ["", "apps", "batch", "networking.k8s.io"]
-        kinds: ["*"]
-  deny:
-    resources:
-      - groups: [""]
-        kinds: ["Secret"]
-      - groups: ["rbac.authorization.k8s.io"]
-        kinds: ["*"]
+  rules:
+    - effect: allow
+      tools: ["get_resource", "list_resources", "describe_resource", "get_logs"]
+      contexts: ["*"]
+      resources:
+        - groups: ["", "apps", "batch", "networking.k8s.io"]
+          resources: ["*"]
+    - effect: deny
+      tools: ["get_*", "list_*", "describe_*"]
+      resources:
+        - groups: [""]
+          resources: ["secrets"]
+        - groups: ["rbac.authorization.k8s.io"]
+          resources: ["*"]
 ```
 
 #### Example: Write only in team namespaces
@@ -578,17 +567,18 @@ Control access by **API group**, **kind**, **namespace**, and **name**.
 - name: "write-own-namespaces"
   match:
     expression: '"developers" in payload.groups'
-  allow:
-    tools: ["apply_manifest", "patch_resource", "delete_resource"]
-    contexts: ["staging"]
-    resources:
-      - groups: ["", "apps"]
-        kinds: ["*"]
-        namespaces: ["team-*"]
-  deny:
-    resources:
-      - groups: [""]
-        kinds: ["Secret"]
+  rules:
+    - effect: allow
+      tools: ["apply_manifest", "patch_resource", "delete_resource"]
+      contexts: ["staging"]
+      resources:
+        - groups: ["", "apps"]
+          resources: ["*"]
+          namespaces: ["team-*"]
+    - effect: deny
+      resources:
+        - groups: [""]
+          resources: ["secrets"]
 ```
 
 #### Example: CI/CD service account
@@ -597,13 +587,14 @@ Control access by **API group**, **kind**, **namespace**, and **name**.
 - name: "cicd-deploy"
   match:
     expression: 'payload.client_id == "ci-cd-service"'
-  allow:
-    tools: ["apply_manifest", "diff_manifest", "get_resource"]
-    contexts: ["production"]
-    resources:
-      - groups: ["", "apps"]
-        kinds: ["Deployment", "Service", "ConfigMap"]
-        namespaces: ["app-*"]
+  rules:
+    - effect: allow
+      tools: ["apply_manifest", "diff_manifest", "get_resource"]
+      contexts: ["production"]
+      resources:
+        - groups: ["", "apps"]
+          resources: ["deployments", "services", "configmaps"]
+          namespaces: ["app-*"]
 ```
 
 #### Example: Full admin access
@@ -612,31 +603,66 @@ Control access by **API group**, **kind**, **namespace**, and **name**.
 - name: "sre-full-access"
   match:
     expression: '"sre" in payload.groups'
-  allow:
-    tools: ["*"]
-    contexts: ["*"]
-    resources:
-      - groups: ["*"]
-        kinds: ["*"]
-      - groups: ["_"]  # Virtual MCP resources
-        kinds: ["*"]
+  rules:
+    - effect: allow
+      tools: ["*"]
+      contexts: ["*"]
+      resources:
+        - groups: ["*"]
+          resources: ["*"]
+        - groups: ["_"]
+          resources: ["*"]
+```
+
+#### Example: Safe operations (read + selective delete)
+
+A production-safe policy: read everything (except secrets), allow pod deletes only in app namespaces, deny exec/apply/patch entirely.
+
+```yaml
+- name: "safe-operations"
+  match:
+    expression: 'has(payload.sub)'
+  rules:
+    - effect: allow
+      tools: ["get_*", "list_*", "describe_*", "diff_*", "check_*", "scale_*", "*_rollout*", "get_logs"]
+      contexts: ["*"]
+      resources:
+        - groups: ["*"]
+          resources: ["*"]
+        - groups: ["_"]
+          resources: ["*"]
+    - effect: allow
+      tools: ["delete_resource"]
+      resources:
+        - groups: [""]
+          resources: ["pods"]
+          namespaces: ["aplicacion-*", "default"]
+    - effect: deny
+      tools: ["get_*", "list_*", "describe_*"]
+      resources:
+        - groups: [""]
+          resources: ["secrets", "serviceaccounts"]
+        - groups: ["external-secrets.io", "cert-manager.io", "certificates.k8s.io"]
+          resources: ["*"]
+    - effect: deny
+      tools: ["exec_command"]
 ```
 
 #### Virtual MCP Resources
 
 Tools that don't operate on K8s resources use virtual resources under group `_`:
 
-| Tools | Kind |
-|-------|------|
-| `list_api_resources`, `list_api_versions` | `APIDiscovery` |
-| `get_cluster_info` | `ClusterInfo` |
-| `get_current_context`, `list_contexts`, `switch_context` | `Context` |
+| Tools | Resource |
+|-------|----------|
+| `list_api_resources`, `list_api_versions` | `apidiscovery` |
+| `get_cluster_info` | `clusterinfo` |
+| `get_current_context`, `list_contexts`, `switch_context` | `contexts` |
 
 ```yaml
 # Allow discovery and context switching
 resources:
   - groups: ["_"]
-    kinds: ["APIDiscovery", "ClusterInfo", "Context"]
+    resources: ["apidiscovery", "clusterinfo", "contexts"]
 ```
 
 ---
@@ -677,7 +703,7 @@ yq_expressions:
 
 ### Prerequisites
 
-- Go 1.24+
+- Go 1.25+
 - Access to a Kubernetes cluster
 - (Optional) Docker for building images
 
@@ -761,7 +787,28 @@ make vet
 
 # Lint (auto-installs golangci-lint)
 make lint
+
+# Run all unit tests (integration tests auto-skip without KUBE_CONTEXT)
+go test ./internal/authorization/ -v -count=1
+
+# Run integration tests against a live cluster
+KUBE_CONTEXT=kind-my-cluster go test ./internal/authorization/ -run TestIntegration -v -count=1
+
+# Run specific integration test
+KUBE_CONTEXT=kind-my-cluster go test ./internal/authorization/ -run TestIntegration_LiveDeleteVerdicts -v -count=1
 ```
+
+#### Integration Tests
+
+The authorization package includes integration tests that validate RBAC policies against a real Kubernetes cluster. They are **dynamic** — they discover all resources in the cluster at runtime and verify every tool/resource combination against the policy.
+
+| Test | What it does |
+|------|--------------|
+| `TestIntegration_SafeOpsAgainstRealCluster` | Evaluates all 8 tools against every discovered resource, prints summary tables by resource type, tool, and namespace |
+| `TestIntegration_DiscoveryReport` | Prints an API type authorization matrix for every resource type in the cluster |
+| `TestIntegration_LiveDeleteVerdicts` | Exhaustive delete/apply/patch verification with zero-violation assertion |
+
+Set `KUBE_CONTEXT` to run them. They skip automatically when the variable is unset, so regular `go test` is safe. Optionally set `KUBECONFIG` to point to a non-default kubeconfig file.
 
 ### Building Docker Image
 

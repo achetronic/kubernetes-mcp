@@ -142,46 +142,57 @@ type MatchConfig struct {
 	Expression string `yaml:"expression"`
 }
 
-// ResourceRule represents a rule for filtering resources by GVK + namespace + name
+// RuleEffect represents whether a rule allows or denies access
+type RuleEffect string
+
+const (
+	RuleEffectAllow RuleEffect = "allow"
+	RuleEffectDeny  RuleEffect = "deny"
+)
+
+// ResourceRule represents a rule for filtering resources by GVR + namespace + name.
+// All fields support glob patterns. Omitted fields match everything.
 type ResourceRule struct {
-	// Groups filters by API group
+	// Groups filters by API group (supports glob)
 	// - [""] = Core API only
 	// - ["_"] = Virtual MCP resources only
 	// - ["*"] or omit = any group
 	Groups []string `yaml:"groups,omitempty"`
 
-	// Versions filters by API version (["*"] = all, omit = all)
+	// Versions filters by API version (supports glob)
+	// - ["*"] or omit = any version
 	Versions []string `yaml:"versions,omitempty"`
 
-	// Kinds filters by resource kind (["*"] = all, omit = all)
-	Kinds []string `yaml:"kinds,omitempty"`
+	// Resources filters by resource name in the API sense (supports glob)
+	// e.g. "pods", "deployments", "configmaps"
+	// - ["*"] or omit = any resource
+	Resources []string `yaml:"resources,omitempty"`
 
-	// Namespaces filters by namespace (supports "prefix-*" wildcards)
+	// Namespaces filters by namespace (supports glob)
 	// - omit = any namespace + cluster-scoped
 	// - ["*"] = any namespaced resource only
 	// - [""] = cluster-scoped only
 	Namespaces []string `yaml:"namespaces,omitempty"`
 
-	// Names filters by resource name (supports "prefix-*" wildcards)
+	// Names filters by resource instance name
+	// Supports exact match or glob patterns
 	Names []string `yaml:"names,omitempty"`
 }
 
-// ToolContextRule represents allowed/denied tools, contexts, resources, and prefixes
-type ToolContextRule struct {
-	Tools              []string       `yaml:"tools,omitempty"`
-	Contexts           []string       `yaml:"contexts,omitempty"`
-	Resources          []ResourceRule `yaml:"resources,omitempty"`
-	LabelPrefixes      []string       `yaml:"label_prefixes,omitempty"`
-	AnnotationPrefixes []string       `yaml:"annotation_prefixes,omitempty"`
+// AuthorizationRule represents a single allow or deny rule within a policy
+type AuthorizationRule struct {
+	Effect    RuleEffect     `yaml:"effect"`
+	Tools     []string       `yaml:"tools,omitempty"`
+	Contexts  []string       `yaml:"contexts,omitempty"`
+	Resources []ResourceRule `yaml:"resources,omitempty"`
 }
 
 // AuthorizationPolicy represents an authorization policy
 type AuthorizationPolicy struct {
-	Name        string           `yaml:"name"`
-	Description string           `yaml:"description,omitempty"`
-	Match       MatchConfig      `yaml:"match"`
-	Allow       *ToolContextRule `yaml:"allow,omitempty"`
-	Deny        *ToolContextRule `yaml:"deny,omitempty"`
+	Name        string              `yaml:"name"`
+	Description string              `yaml:"description,omitempty"`
+	Match       MatchConfig         `yaml:"match"`
+	Rules       []AuthorizationRule `yaml:"rules"`
 }
 
 // AuthorizationConfig represents the authorization configuration

@@ -63,10 +63,10 @@ func (m *Manager) handleApplyManifest(ctx context.Context, request mcp.CallToolR
 
 	// Check authorization
 	if err := m.checkAuthorization(request, "apply_manifest", k8sContext, namespace, authorization.ResourceInfo{
-		Group:   gvk.Group,
-		Version: gvk.Version,
-		Kind:    gvk.Kind,
-		Name:    obj.GetName(),
+		Group:    gvk.Group,
+		Version:  gvk.Version,
+		Resource: kindToResource(gvk.Kind),
+		Name:     obj.GetName(),
 	}); err != nil {
 		return errorResult(err), nil
 	}
@@ -137,10 +137,10 @@ func (m *Manager) handlePatchResource(ctx context.Context, request mcp.CallToolR
 
 	// Check authorization
 	if err := m.checkAuthorization(request, "patch_resource", k8sContext, namespace, authorization.ResourceInfo{
-		Group:   group,
-		Version: version,
-		Kind:    kind,
-		Name:    name,
+		Group:    group,
+		Version:  version,
+		Resource: kindToResource(kind),
+		Name:     name,
 	}); err != nil {
 		return errorResult(err), nil
 	}
@@ -230,10 +230,10 @@ func (m *Manager) handleDeleteResource(ctx context.Context, request mcp.CallTool
 
 	// Check authorization
 	if err := m.checkAuthorization(request, "delete_resource", k8sContext, namespace, authorization.ResourceInfo{
-		Group:   group,
-		Version: version,
-		Kind:    kind,
-		Name:    name,
+		Group:    group,
+		Version:  version,
+		Resource: kindToResource(kind),
+		Name:     name,
 	}); err != nil {
 		return errorResult(err), nil
 	}
@@ -296,9 +296,9 @@ func (m *Manager) handleDeleteResources(ctx context.Context, request mcp.CallToo
 
 	// Check authorization
 	if err := m.checkAuthorization(request, "delete_resources", k8sContext, namespace, authorization.ResourceInfo{
-		Group:   group,
-		Version: version,
-		Kind:    kind,
+		Group:    group,
+		Version:  version,
+		Resource: kindToResource(kind),
 	}); err != nil {
 		return errorResult(err), nil
 	}

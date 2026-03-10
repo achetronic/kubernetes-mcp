@@ -96,13 +96,12 @@ authorization:
       description: "Allow all tools for authenticated users"
       match:
         expression: 'has(payload.sub)'
-      allow:
-        tools: ["*"]
-        contexts: ["*"]
-        resources:
-          # All real K8s resources
-          - groups: ["*"]
-            kinds: ["*"]
-          # All virtual MCP resources (discovery, context, cluster info)
-          - groups: ["_"]
-            kinds: ["*"]
+      rules:
+        - effect: allow
+          tools: ["*"]
+          contexts: ["*"]
+          resources:
+            - groups: ["*"]
+              resources: ["*"]
+            - groups: ["_"]
+              resources: ["*"]
