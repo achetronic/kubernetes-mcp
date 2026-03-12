@@ -704,10 +704,10 @@ func TestResourceGVRMatching(t *testing.T) {
 
 func TestDenyTakesPriority(t *testing.T) {
 	tests := []struct {
-		name    string
-		rules   []api.AuthorizationRule
-		req     AuthzRequest
-		want    bool
+		name  string
+		rules []api.AuthorizationRule
+		req   AuthzRequest
+		want  bool
 	}{
 		{
 			name: "allow all then deny specific tool",

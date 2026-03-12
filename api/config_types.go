@@ -62,8 +62,8 @@ type JWTConfig struct {
 
 // APIKeyConfig represents a single API key entry
 type APIKeyConfig struct {
-	Name   string         `yaml:"name"`
-	Token  string         `yaml:"token"`
+	Name    string         `yaml:"name"`
+	Token   string         `yaml:"token"`
 	Payload map[string]any `yaml:"payload"`
 }
 

@@ -39,8 +39,8 @@ type APIKeyValidationMiddleware struct {
 }
 
 type hashedAPIKey struct {
-	name       string
-	tokenHash  [sha256.Size]byte
+	name        string
+	tokenHash   [sha256.Size]byte
 	payloadJSON []byte
 }
 

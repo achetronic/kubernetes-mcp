@@ -549,11 +549,11 @@ func TestSafeOps_Authentication(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			allowed, err := eval.Evaluate(AuthzRequest{
-				Payload: c.payload,
-				Tool:    "get_resource",
-				Context: "prod",
+				Payload:   c.payload,
+				Tool:      "get_resource",
+				Context:   "prod",
 				Namespace: "default",
-				Resource: ResourceInfo{Group: "", Resource: "pods"},
+				Resource:  ResourceInfo{Group: "", Resource: "pods"},
 			})
 			if err != nil {
 				t.Fatalf("Evaluate: %v", err)

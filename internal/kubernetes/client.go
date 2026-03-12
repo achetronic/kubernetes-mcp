@@ -299,11 +299,6 @@ func (cm *ClientManager) loadNewContextFromFile(kubeconfigPath string) error {
 	cm.mutex.Lock()
 	defer cm.mutex.Unlock()
 
-	// Check for collision
-	if existing, exists := cm.contextsByName[contextName]; exists {
-		return fmt.Errorf("context name collision: %q already defined (from %s)", contextName, existing.Kubeconfig)
-	}
-
 	ctxConfig := api.KubernetesContextConfig{
 		Name:       contextName,
 		Kubeconfig: kubeconfigPath,
@@ -314,16 +309,23 @@ func (cm *ClientManager) loadNewContextFromFile(kubeconfigPath string) error {
 		return fmt.Errorf("failed to create client: %w", err)
 	}
 
+	_, replacing := cm.contextsByName[contextName]
+
 	cm.clients[contextName] = client
 	cm.contextsByName[contextName] = ctxConfig
-	cm.fileToContexts[kubeconfigPath] = append(cm.fileToContexts[kubeconfigPath], contextName)
 
-	// Watch the new kubeconfig file for future changes
-	if err := cm.watcher.Add(kubeconfigPath); err != nil {
-		cm.logger.Warn("failed to watch new kubeconfig file", "path", kubeconfigPath, "error", err)
+	if !replacing {
+		cm.fileToContexts[kubeconfigPath] = append(cm.fileToContexts[kubeconfigPath], contextName)
+
+		// Watch the new kubeconfig file for future changes
+		if err := cm.watcher.Add(kubeconfigPath); err != nil {
+			cm.logger.Warn("failed to watch new kubeconfig file", "path", kubeconfigPath, "error", err)
+		}
+
+		cm.logger.Info("loaded new kubeconfig from contexts directory", "context", contextName, "kubeconfig", kubeconfigPath)
+	} else {
+		cm.logger.Info("replaced existing kubeconfig from contexts directory", "context", contextName, "kubeconfig", kubeconfigPath)
 	}
-
-	cm.logger.Info("loaded new kubeconfig from contexts directory", "context", contextName, "kubeconfig", kubeconfigPath)
 	return nil
 }
 
