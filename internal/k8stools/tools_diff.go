@@ -53,17 +53,32 @@ func (m *Manager) handleDiffManifest(ctx context.Context, request mcp.CallToolRe
 	}
 
 	gvk := obj.GroupVersionKind()
+	name := obj.GetName()
+
+	client, err := m.clientManager.GetClient(k8sContext)
+	if err != nil {
+		return errorResult(err), nil
+	}
+
+	// Resolve GVR + namespaced flag from cluster discovery via RESTMapper
+	gvr, namespaced, err := m.resolveGVRForGVK(client, gvk)
+	if err != nil {
+		return errorResult(err), nil
+	}
+
 	namespace := obj.GetNamespace()
 	if namespaceOverride != "" {
 		namespace = namespaceOverride
 	}
-	name := obj.GetName()
+	if !namespaced {
+		namespace = ""
+	}
 
 	// Check authorization
 	if err := m.checkAuthorization(request, "diff_manifest", k8sContext, namespace, authorization.ResourceInfo{
-		Group:    gvk.Group,
-		Version:  gvk.Version,
-		Resource: kindToResource(gvk.Kind),
+		Group:    gvr.Group,
+		Version:  gvr.Version,
+		Resource: gvr.Resource,
 		Name:     name,
 	}); err != nil {
 		return errorResult(err), nil
@@ -72,13 +87,6 @@ func (m *Manager) handleDiffManifest(ctx context.Context, request mcp.CallToolRe
 	if namespace != "" && !m.clientManager.IsNamespaceAllowed(k8sContext, namespace) {
 		return errorResult(fmt.Errorf("namespace %s is not allowed in context %s", namespace, k8sContext)), nil
 	}
-
-	client, err := m.clientManager.GetClient(k8sContext)
-	if err != nil {
-		return errorResult(err), nil
-	}
-
-	gvr := getGVR(gvk.Group, gvk.Version, gvk.Kind)
 
 	// Get current resource from cluster
 	var current *unstructured.Unstructured

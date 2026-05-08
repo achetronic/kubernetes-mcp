@@ -19,13 +19,34 @@ package k8stools
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"kubernetes-mcp/internal/authorization"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	authv1 "k8s.io/api/authorization/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+// metricsServerError converts an API error coming from the metrics API into
+// a user-friendly "metrics-server is not available" message when the failure
+// is caused by the metrics.k8s.io API not being registered. Other errors are
+// returned untouched.
+func metricsServerError(err error) error {
+	if err == nil {
+		return nil
+	}
+	// metrics.k8s.io is served by an APIService backed by metrics-server. When
+	// metrics-server is missing, the API server returns NotFound for the
+	// "metrics" group resources.
+	msg := err.Error()
+	if apierrors.IsNotFound(err) || apierrors.IsServiceUnavailable(err) ||
+		strings.Contains(msg, "metrics.k8s.io") || strings.Contains(msg, "could not find the requested resource") {
+		return fmt.Errorf("metrics-server is not available in this cluster: %w", err)
+	}
+	return err
+}
 
 func (m *Manager) registerCheckPermission() {
 	tool := mcp.NewTool(m.toolName("check_permission"),
@@ -167,7 +188,7 @@ func (m *Manager) handleGetPodMetrics(ctx context.Context, request mcp.CallToolR
 	}
 
 	if err != nil {
-		return errorResult(err), nil
+		return errorResult(metricsServerError(err)), nil
 	}
 
 	yamlOutput, err := objectToYAML(result)
@@ -231,7 +252,7 @@ func (m *Manager) handleGetNodeMetrics(ctx context.Context, request mcp.CallTool
 	}
 
 	if err != nil {
-		return errorResult(err), nil
+		return errorResult(metricsServerError(err)), nil
 	}
 
 	yamlOutput, err := objectToYAML(result)

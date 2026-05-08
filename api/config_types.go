@@ -129,12 +129,21 @@ type KubernetesToolsConfig struct {
 	BulkOperations BulkOperationsConfig `yaml:"bulk_operations,omitempty"`
 }
 
+// DiscoveryConfig controls how the kubernetes API discovery cache (used by the
+// RESTMapper to resolve Kind -> Resource) is refreshed.
+type DiscoveryConfig struct {
+	// RefreshInterval is how often the discovery cache is invalidated so that
+	// newly installed CRDs and API changes are picked up. Default: 10m.
+	RefreshInterval time.Duration `yaml:"refresh_interval,omitempty"`
+}
+
 // KubernetesConfig represents the Kubernetes configuration
 type KubernetesConfig struct {
 	DefaultContext string                    `yaml:"default_context"`
 	Contexts       []KubernetesContextConfig `yaml:"contexts,omitempty"`
 	ContextsDir    string                    `yaml:"contexts_dir,omitempty"`
 	Tools          KubernetesToolsConfig     `yaml:"tools,omitempty"`
+	Discovery      DiscoveryConfig           `yaml:"discovery,omitempty"`
 }
 
 // MatchConfig represents a match condition for authorization

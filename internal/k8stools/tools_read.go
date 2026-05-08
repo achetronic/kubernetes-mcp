@@ -32,8 +32,8 @@ func (m *Manager) registerGetResource() {
 		mcp.WithString("context", mcp.Description("Kubernetes context to use (optional, uses current if not specified)")),
 		mcp.WithString("group", mcp.Description("API group (e.g., 'apps', 'batch', empty for core)")),
 		mcp.WithString("version", mcp.Required(), mcp.Description("API version (e.g., 'v1', 'v1beta1')")),
-		mcp.WithString("kind", mcp.Required(), mcp.Description("Resource kind (e.g., 'Pod', 'Deployment')")),
-		mcp.WithString("name", mcp.Required(), mcp.Description("Resource name")),
+		mcp.WithString("resource", mcp.Required(), mcp.Description("Resource name in the API sense, lowercase plural (e.g., 'pods', 'deployments', 'ingresses', 'networkpolicies'). NOT the Kind.")),
+		mcp.WithString("name", mcp.Required(), mcp.Description("Resource instance name")),
 		mcp.WithString("namespace", mcp.Description("Namespace (optional for cluster-scoped resources)")),
 		mcp.WithArray("yq_expressions", mcp.Description("Array of yq expressions (https://mikefarah.gitbook.io/yq) to filter/transform the YAML output. Applied sequentially. Examples: '.metadata.name' (get name), '.spec.containers[].image' (get all container images), 'select(.status.phase == \"Running\")' (filter by condition), '.items[] | {name: .metadata.name, status: .status.phase}' (reshape output)")),
 	)
@@ -44,17 +44,18 @@ func (m *Manager) handleGetResource(ctx context.Context, request mcp.CallToolReq
 	args := request.GetArguments()
 
 	k8sContext := m.getContextParam(args)
-	group, _ := args["group"].(string)
-	version, _ := args["version"].(string)
-	kind, _ := args["kind"].(string)
 	name, _ := args["name"].(string)
 	namespace, _ := args["namespace"].(string)
+	gvr := gvrFromArgs(args)
+	if err := validateGVR(gvr); err != nil {
+		return errorResult(err), nil
+	}
 
 	// Check authorization
 	if err := m.checkAuthorization(request, "get_resource", k8sContext, namespace, authorization.ResourceInfo{
-		Group:    group,
-		Version:  version,
-		Resource: kindToResource(kind),
+		Group:    gvr.Group,
+		Version:  gvr.Version,
+		Resource: gvr.Resource,
 		Name:     name,
 	}); err != nil {
 		return errorResult(err), nil
@@ -69,8 +70,6 @@ func (m *Manager) handleGetResource(ctx context.Context, request mcp.CallToolReq
 	if err != nil {
 		return errorResult(err), nil
 	}
-
-	gvr := getGVR(group, version, kind)
 
 	var result any
 	if namespace != "" {
@@ -103,7 +102,7 @@ func (m *Manager) registerListResources() {
 		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
 		mcp.WithString("group", mcp.Description("API group")),
 		mcp.WithString("version", mcp.Required(), mcp.Description("API version")),
-		mcp.WithString("kind", mcp.Required(), mcp.Description("Resource kind")),
+		mcp.WithString("resource", mcp.Required(), mcp.Description("Resource name in the API sense, lowercase plural (e.g., 'pods', 'deployments', 'ingresses'). NOT the Kind.")),
 		mcp.WithString("namespace", mcp.Description("Namespace (empty for all namespaces)")),
 		mcp.WithString("label_selector", mcp.Description("Label selector (e.g., 'app=nginx,env!=prod')")),
 		mcp.WithString("field_selector", mcp.Description("Field selector (e.g., 'metadata.name=foo')")),
@@ -116,16 +115,17 @@ func (m *Manager) handleListResources(ctx context.Context, request mcp.CallToolR
 	args := request.GetArguments()
 
 	k8sContext := m.getContextParam(args)
-	group, _ := args["group"].(string)
-	version, _ := args["version"].(string)
-	kind, _ := args["kind"].(string)
 	namespace, _ := args["namespace"].(string)
+	gvr := gvrFromArgs(args)
+	if err := validateGVR(gvr); err != nil {
+		return errorResult(err), nil
+	}
 
 	// Check authorization
 	if err := m.checkAuthorization(request, "list_resources", k8sContext, namespace, authorization.ResourceInfo{
-		Group:    group,
-		Version:  version,
-		Resource: kindToResource(kind),
+		Group:    gvr.Group,
+		Version:  gvr.Version,
+		Resource: gvr.Resource,
 	}); err != nil {
 		return errorResult(err), nil
 	}
@@ -140,7 +140,6 @@ func (m *Manager) handleListResources(ctx context.Context, request mcp.CallToolR
 		return errorResult(err), nil
 	}
 
-	gvr := getGVR(group, version, kind)
 	listOpts := getListOptions(args)
 
 	var result any
@@ -174,8 +173,8 @@ func (m *Manager) registerDescribeResource() {
 		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
 		mcp.WithString("group", mcp.Description("API group")),
 		mcp.WithString("version", mcp.Required(), mcp.Description("API version")),
-		mcp.WithString("kind", mcp.Required(), mcp.Description("Resource kind")),
-		mcp.WithString("name", mcp.Required(), mcp.Description("Resource name")),
+		mcp.WithString("resource", mcp.Required(), mcp.Description("Resource name in the API sense, lowercase plural (e.g., 'pods', 'deployments'). NOT the Kind.")),
+		mcp.WithString("name", mcp.Required(), mcp.Description("Resource instance name")),
 		mcp.WithString("namespace", mcp.Description("Namespace")),
 		mcp.WithArray("yq_expressions", mcp.Description("Array of yq expressions (https://mikefarah.gitbook.io/yq) to filter/transform the YAML output. Applied sequentially. Examples: '.metadata.name' (get name), '.spec.containers[].image' (get all container images), 'select(.status.phase == \"Running\")' (filter by condition), '.items[] | {name: .metadata.name, status: .status.phase}' (reshape output)")),
 	)
@@ -186,17 +185,18 @@ func (m *Manager) handleDescribeResource(ctx context.Context, request mcp.CallTo
 	args := request.GetArguments()
 
 	k8sContext := m.getContextParam(args)
-	group, _ := args["group"].(string)
-	version, _ := args["version"].(string)
-	kind, _ := args["kind"].(string)
 	name, _ := args["name"].(string)
 	namespace, _ := args["namespace"].(string)
+	gvr := gvrFromArgs(args)
+	if err := validateGVR(gvr); err != nil {
+		return errorResult(err), nil
+	}
 
 	// Check authorization
 	if err := m.checkAuthorization(request, "describe_resource", k8sContext, namespace, authorization.ResourceInfo{
-		Group:    group,
-		Version:  version,
-		Resource: kindToResource(kind),
+		Group:    gvr.Group,
+		Version:  gvr.Version,
+		Resource: gvr.Resource,
 		Name:     name,
 	}); err != nil {
 		return errorResult(err), nil
@@ -210,8 +210,6 @@ func (m *Manager) handleDescribeResource(ctx context.Context, request mcp.CallTo
 	if err != nil {
 		return errorResult(err), nil
 	}
-
-	gvr := getGVR(group, version, kind)
 
 	// Get the resource
 	var resource any
@@ -230,15 +228,19 @@ func (m *Manager) handleDescribeResource(ctx context.Context, request mcp.CallTo
 		return errorResult(err), nil
 	}
 
-	// Get related events
+	// Get related events. Resolve the Kind via the RESTMapper since events are
+	// indexed by involvedObject.kind, not by resource.
 	eventsOutput := ""
 	if namespace != "" {
-		events, err := client.Clientset.CoreV1().Events(namespace).List(ctx, metav1.ListOptions{
-			FieldSelector: fmt.Sprintf("involvedObject.name=%s,involvedObject.kind=%s", name, kind),
-		})
-		if err == nil && len(events.Items) > 0 {
-			eventsYAML, _ := objectToYAML(events)
-			eventsOutput = "\n---\n# Related Events\n" + eventsYAML
+		kind, kindErr := m.resolveKindForGVR(client, gvr)
+		if kindErr == nil && kind != "" {
+			events, err := client.Clientset.CoreV1().Events(namespace).List(ctx, metav1.ListOptions{
+				FieldSelector: fmt.Sprintf("involvedObject.name=%s,involvedObject.kind=%s", name, kind),
+			})
+			if err == nil && len(events.Items) > 0 {
+				eventsYAML, _ := objectToYAML(events)
+				eventsOutput = "\n---\n# Related Events\n" + eventsYAML
+			}
 		}
 	}
 

@@ -27,6 +27,7 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 )
 
@@ -36,8 +37,8 @@ func (m *Manager) registerScaleResource() {
 		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
 		mcp.WithString("group", mcp.Description("API group (default: apps)")),
 		mcp.WithString("version", mcp.Required(), mcp.Description("API version")),
-		mcp.WithString("kind", mcp.Required(), mcp.Description("Resource kind")),
-		mcp.WithString("name", mcp.Required(), mcp.Description("Resource name")),
+		mcp.WithString("resource", mcp.Required(), mcp.Description("Resource name in the API sense, lowercase plural (e.g., 'deployments', 'statefulsets', 'replicasets'). NOT the Kind.")),
+		mcp.WithString("name", mcp.Required(), mcp.Description("Resource instance name")),
 		mcp.WithString("namespace", mcp.Description("Namespace")),
 		mcp.WithNumber("replicas", mcp.Required(), mcp.Description("Desired number of replicas")),
 	)
@@ -53,16 +54,21 @@ func (m *Manager) handleScaleResource(ctx context.Context, request mcp.CallToolR
 		group = "apps"
 	}
 	version, _ := args["version"].(string)
-	kind, _ := args["kind"].(string)
+	resource, _ := args["resource"].(string)
 	name, _ := args["name"].(string)
 	namespace, _ := args["namespace"].(string)
 	replicas, _ := args["replicas"].(float64)
 
+	gvr := schema.GroupVersionResource{Group: group, Version: version, Resource: resource}
+	if err := validateGVR(gvr); err != nil {
+		return errorResult(err), nil
+	}
+
 	// Check authorization
 	if err := m.checkAuthorization(request, "scale_resource", k8sContext, namespace, authorization.ResourceInfo{
-		Group:    group,
-		Version:  version,
-		Resource: kindToResource(kind),
+		Group:    gvr.Group,
+		Version:  gvr.Version,
+		Resource: gvr.Resource,
 		Name:     name,
 	}); err != nil {
 		return errorResult(err), nil
@@ -89,8 +95,6 @@ func (m *Manager) handleScaleResource(ctx context.Context, request mcp.CallToolR
 		return errorResult(err), nil
 	}
 
-	gvr := getGVR(group, version, kind)
-
 	result, err := client.DynamicClient.Resource(gvr).Namespace(namespace).Patch(
 		ctx, name, types.MergePatchType, patchBytes, metav1.PatchOptions{})
 	if err != nil {
@@ -102,7 +106,7 @@ func (m *Manager) handleScaleResource(ctx context.Context, request mcp.CallToolR
 		return errorResult(err), nil
 	}
 
-	return successResult(fmt.Sprintf("Successfully scaled %s/%s to %d replicas\n\n%s", kind, name, int(replicas), yamlOutput)), nil
+	return successResult(fmt.Sprintf("Successfully scaled %s/%s to %d replicas\n\n%s", gvr.Resource, name, int(replicas), yamlOutput)), nil
 }
 
 func (m *Manager) registerGetRolloutStatus() {
@@ -111,8 +115,8 @@ func (m *Manager) registerGetRolloutStatus() {
 		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
 		mcp.WithString("group", mcp.Description("API group (default: apps)")),
 		mcp.WithString("version", mcp.Required(), mcp.Description("API version")),
-		mcp.WithString("kind", mcp.Required(), mcp.Description("Resource kind (Deployment, DaemonSet, StatefulSet)")),
-		mcp.WithString("name", mcp.Required(), mcp.Description("Resource name")),
+		mcp.WithString("resource", mcp.Required(), mcp.Description("Resource name in the API sense, lowercase plural ('deployments', 'daemonsets', 'statefulsets'). NOT the Kind.")),
+		mcp.WithString("name", mcp.Required(), mcp.Description("Resource instance name")),
 		mcp.WithString("namespace", mcp.Description("Namespace")),
 	)
 	m.mcpServer.AddTool(tool, m.handleGetRolloutStatus)
@@ -127,15 +131,20 @@ func (m *Manager) handleGetRolloutStatus(ctx context.Context, request mcp.CallTo
 		group = "apps"
 	}
 	version, _ := args["version"].(string)
-	kind, _ := args["kind"].(string)
+	resource, _ := args["resource"].(string)
 	name, _ := args["name"].(string)
 	namespace, _ := args["namespace"].(string)
 
+	gvr := schema.GroupVersionResource{Group: group, Version: version, Resource: resource}
+	if err := validateGVR(gvr); err != nil {
+		return errorResult(err), nil
+	}
+
 	// Check authorization
 	if err := m.checkAuthorization(request, "get_rollout_status", k8sContext, namespace, authorization.ResourceInfo{
-		Group:    group,
-		Version:  version,
-		Resource: kindToResource(kind),
+		Group:    gvr.Group,
+		Version:  gvr.Version,
+		Resource: gvr.Resource,
 		Name:     name,
 	}); err != nil {
 		return errorResult(err), nil
@@ -149,8 +158,6 @@ func (m *Manager) handleGetRolloutStatus(ctx context.Context, request mcp.CallTo
 	if err != nil {
 		return errorResult(err), nil
 	}
-
-	gvr := getGVR(group, version, kind)
 
 	obj, err := client.DynamicClient.Resource(gvr).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
@@ -175,7 +182,7 @@ func (m *Manager) handleGetRolloutStatus(ctx context.Context, request mcp.CallTo
   Available:  %d
   Generation: %d (observed: %d)
   Synced:     %v`,
-		kind, name,
+		gvr.Resource, name,
 		desiredReplicas,
 		readyReplicas,
 		updatedReplicas,
@@ -208,8 +215,8 @@ func (m *Manager) registerRestartRollout() {
 		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
 		mcp.WithString("group", mcp.Description("API group (default: apps)")),
 		mcp.WithString("version", mcp.Required(), mcp.Description("API version")),
-		mcp.WithString("kind", mcp.Required(), mcp.Description("Resource kind (Deployment, DaemonSet, StatefulSet)")),
-		mcp.WithString("name", mcp.Required(), mcp.Description("Resource name")),
+		mcp.WithString("resource", mcp.Required(), mcp.Description("Resource name in the API sense, lowercase plural ('deployments', 'daemonsets', 'statefulsets'). NOT the Kind.")),
+		mcp.WithString("name", mcp.Required(), mcp.Description("Resource instance name")),
 		mcp.WithString("namespace", mcp.Description("Namespace")),
 	)
 	m.mcpServer.AddTool(tool, m.handleRestartRollout)
@@ -224,15 +231,20 @@ func (m *Manager) handleRestartRollout(ctx context.Context, request mcp.CallTool
 		group = "apps"
 	}
 	version, _ := args["version"].(string)
-	kind, _ := args["kind"].(string)
+	resource, _ := args["resource"].(string)
 	name, _ := args["name"].(string)
 	namespace, _ := args["namespace"].(string)
 
+	gvr := schema.GroupVersionResource{Group: group, Version: version, Resource: resource}
+	if err := validateGVR(gvr); err != nil {
+		return errorResult(err), nil
+	}
+
 	// Check authorization
 	if err := m.checkAuthorization(request, "restart_rollout", k8sContext, namespace, authorization.ResourceInfo{
-		Group:    group,
-		Version:  version,
-		Resource: kindToResource(kind),
+		Group:    gvr.Group,
+		Version:  gvr.Version,
+		Resource: gvr.Resource,
 		Name:     name,
 	}); err != nil {
 		return errorResult(err), nil
@@ -265,15 +277,13 @@ func (m *Manager) handleRestartRollout(ctx context.Context, request mcp.CallTool
 		return errorResult(err), nil
 	}
 
-	gvr := getGVR(group, version, kind)
-
 	_, err = client.DynamicClient.Resource(gvr).Namespace(namespace).Patch(
 		ctx, name, types.MergePatchType, patchBytes, metav1.PatchOptions{})
 	if err != nil {
 		return errorResult(err), nil
 	}
 
-	return successResult(fmt.Sprintf("Successfully triggered restart for %s/%s", kind, name)), nil
+	return successResult(fmt.Sprintf("Successfully triggered restart for %s/%s", gvr.Resource, name)), nil
 }
 
 func (m *Manager) registerUndoRollout() {
@@ -282,8 +292,8 @@ func (m *Manager) registerUndoRollout() {
 		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
 		mcp.WithString("group", mcp.Description("API group (default: apps)")),
 		mcp.WithString("version", mcp.Required(), mcp.Description("API version")),
-		mcp.WithString("kind", mcp.Required(), mcp.Description("Resource kind (Deployment, DaemonSet, StatefulSet)")),
-		mcp.WithString("name", mcp.Required(), mcp.Description("Resource name")),
+		mcp.WithString("resource", mcp.Required(), mcp.Description("Resource name in the API sense, lowercase plural ('deployments', 'daemonsets', 'statefulsets'). NOT the Kind.")),
+		mcp.WithString("name", mcp.Required(), mcp.Description("Resource instance name")),
 		mcp.WithString("namespace", mcp.Description("Namespace")),
 		mcp.WithNumber("to_revision", mcp.Description("Revision to rollback to (default: previous revision)")),
 	)
@@ -299,16 +309,21 @@ func (m *Manager) handleUndoRollout(ctx context.Context, request mcp.CallToolReq
 		group = "apps"
 	}
 	version, _ := args["version"].(string)
-	kind, _ := args["kind"].(string)
+	resource, _ := args["resource"].(string)
 	name, _ := args["name"].(string)
 	namespace, _ := args["namespace"].(string)
 	toRevision, _ := args["to_revision"].(float64)
 
+	gvr := schema.GroupVersionResource{Group: group, Version: version, Resource: resource}
+	if err := validateGVR(gvr); err != nil {
+		return errorResult(err), nil
+	}
+
 	// Check authorization
 	if err := m.checkAuthorization(request, "undo_rollout", k8sContext, namespace, authorization.ResourceInfo{
-		Group:    group,
-		Version:  version,
-		Resource: kindToResource(kind),
+		Group:    gvr.Group,
+		Version:  gvr.Version,
+		Resource: gvr.Resource,
 		Name:     name,
 	}); err != nil {
 		return errorResult(err), nil
@@ -323,81 +338,77 @@ func (m *Manager) handleUndoRollout(ctx context.Context, request mcp.CallToolReq
 		return errorResult(err), nil
 	}
 
-	// For Deployments, we need to find the ReplicaSet and patch it
-	// This is a simplified implementation - kubectl does more sophisticated handling
-	switch kind {
-	case "Deployment":
-		// Get the deployment
-		gvr := getGVR(group, version, kind)
-		deployment, err := client.DynamicClient.Resource(gvr).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
-		if err != nil {
-			return errorResult(err), nil
-		}
+	// Currently only Deployments are supported (apps/deployments).
+	if !(gvr.Group == "apps" && gvr.Resource == "deployments") {
+		return errorResult(fmt.Errorf("undo rollout is only supported for apps/deployments")), nil
+	}
 
-		// Find ReplicaSets for this deployment
-		rsGVR := getGVR("apps", "v1", "ReplicaSet")
-		selector, _, _ := unstructured.NestedString(deployment.Object, "spec", "selector", "matchLabels")
-		_ = selector // Use this to find matching ReplicaSets
+	// Get the deployment
+	deployment, err := client.DynamicClient.Resource(gvr).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return errorResult(err), nil
+	}
 
-		rsList, err := client.DynamicClient.Resource(rsGVR).Namespace(namespace).List(ctx, metav1.ListOptions{})
-		if err != nil {
-			return errorResult(err), nil
-		}
+	// Find ReplicaSets for this deployment
+	rsGVR := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "replicasets"}
+	selector, _, _ := unstructured.NestedString(deployment.Object, "spec", "selector", "matchLabels")
+	_ = selector // Use this to find matching ReplicaSets
 
-		// Find the ReplicaSet with the desired revision
-		var targetRS *unstructured.Unstructured
-		for _, item := range rsList.Items {
-			// Check owner references
-			ownerRefs, _, _ := unstructured.NestedSlice(item.Object, "metadata", "ownerReferences")
-			for _, ref := range ownerRefs {
-				if refMap, ok := ref.(map[string]any); ok {
-					if refName, _ := refMap["name"].(string); refName == name {
-						// Check revision annotation
-						annotations, _, _ := unstructured.NestedMap(item.Object, "metadata", "annotations")
-						if revision, ok := annotations["deployment.kubernetes.io/revision"].(string); ok {
-							if toRevision > 0 && revision == fmt.Sprintf("%d", int(toRevision)) {
-								targetRS = &item
-								break
-							} else if toRevision == 0 && targetRS == nil {
-								// Keep track of the latest RS for rollback
-								targetRS = &item
-							}
+	rsList, err := client.DynamicClient.Resource(rsGVR).Namespace(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return errorResult(err), nil
+	}
+
+	// Find the ReplicaSet with the desired revision
+	var targetRS *unstructured.Unstructured
+	for _, item := range rsList.Items {
+		// Check owner references
+		ownerRefs, _, _ := unstructured.NestedSlice(item.Object, "metadata", "ownerReferences")
+		for _, ref := range ownerRefs {
+			if refMap, ok := ref.(map[string]any); ok {
+				if refName, _ := refMap["name"].(string); refName == name {
+					// Check revision annotation
+					annotations, _, _ := unstructured.NestedMap(item.Object, "metadata", "annotations")
+					if revision, ok := annotations["deployment.kubernetes.io/revision"].(string); ok {
+						if toRevision > 0 && revision == fmt.Sprintf("%d", int(toRevision)) {
+							targetRS = &item
+							break
+						} else if toRevision == 0 && targetRS == nil {
+							// Keep track of the latest RS for rollback
+							targetRS = &item
 						}
 					}
 				}
 			}
 		}
-
-		if targetRS == nil {
-			return errorResult(fmt.Errorf("no suitable revision found for rollback")), nil
-		}
-
-		// Get the pod template from the target ReplicaSet
-		template, _, _ := unstructured.NestedMap(targetRS.Object, "spec", "template")
-
-		// Patch the deployment with the template from the target RS
-		patch := map[string]any{
-			"spec": map[string]any{
-				"template": template,
-			},
-		}
-
-		patchBytes, err := json.Marshal(patch)
-		if err != nil {
-			return errorResult(err), nil
-		}
-
-		_, err = client.DynamicClient.Resource(gvr).Namespace(namespace).Patch(
-			ctx, name, types.MergePatchType, patchBytes, metav1.PatchOptions{})
-		if err != nil {
-			return errorResult(err), nil
-		}
-
-		return successResult(fmt.Sprintf("Successfully rolled back %s/%s", kind, name)), nil
-
-	default:
-		return errorResult(fmt.Errorf("undo rollout is only supported for Deployments")), nil
 	}
+
+	if targetRS == nil {
+		return errorResult(fmt.Errorf("no suitable revision found for rollback")), nil
+	}
+
+	// Get the pod template from the target ReplicaSet
+	template, _, _ := unstructured.NestedMap(targetRS.Object, "spec", "template")
+
+	// Patch the deployment with the template from the target RS
+	patch := map[string]any{
+		"spec": map[string]any{
+			"template": template,
+		},
+	}
+
+	patchBytes, err := json.Marshal(patch)
+	if err != nil {
+		return errorResult(err), nil
+	}
+
+	_, err = client.DynamicClient.Resource(gvr).Namespace(namespace).Patch(
+		ctx, name, types.MergePatchType, patchBytes, metav1.PatchOptions{})
+	if err != nil {
+		return errorResult(err), nil
+	}
+
+	return successResult(fmt.Sprintf("Successfully rolled back %s/%s", gvr.Resource, name)), nil
 }
 
 // Helper to extract nested values

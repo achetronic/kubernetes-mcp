@@ -55,17 +55,32 @@ func (m *Manager) handleApplyManifest(ctx context.Context, request mcp.CallToolR
 	}
 
 	gvk := obj.GroupVersionKind()
+
+	client, err := m.clientManager.GetClient(k8sContext)
+	if err != nil {
+		return errorResult(err), nil
+	}
+
+	// Resolve GVR + namespaced flag from the cluster discovery via RESTMapper
+	gvr, namespaced, err := m.resolveGVRForGVK(client, gvk)
+	if err != nil {
+		return errorResult(err), nil
+	}
+
 	namespace := obj.GetNamespace()
 	if namespaceOverride != "" {
 		namespace = namespaceOverride
 		obj.SetNamespace(namespace)
 	}
+	if !namespaced {
+		namespace = ""
+	}
 
 	// Check authorization
 	if err := m.checkAuthorization(request, "apply_manifest", k8sContext, namespace, authorization.ResourceInfo{
-		Group:    gvk.Group,
-		Version:  gvk.Version,
-		Resource: kindToResource(gvk.Kind),
+		Group:    gvr.Group,
+		Version:  gvr.Version,
+		Resource: gvr.Resource,
 		Name:     obj.GetName(),
 	}); err != nil {
 		return errorResult(err), nil
@@ -74,13 +89,6 @@ func (m *Manager) handleApplyManifest(ctx context.Context, request mcp.CallToolR
 	if namespace != "" && !m.clientManager.IsNamespaceAllowed(k8sContext, namespace) {
 		return errorResult(fmt.Errorf("namespace %s is not allowed in context %s", namespace, k8sContext)), nil
 	}
-
-	client, err := m.clientManager.GetClient(k8sContext)
-	if err != nil {
-		return errorResult(err), nil
-	}
-
-	gvr := getGVR(gvk.Group, gvk.Version, gvk.Kind)
 
 	// Try to create, if exists then update
 	var result *unstructured.Unstructured
@@ -114,8 +122,8 @@ func (m *Manager) registerPatchResource() {
 		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
 		mcp.WithString("group", mcp.Description("API group")),
 		mcp.WithString("version", mcp.Required(), mcp.Description("API version")),
-		mcp.WithString("kind", mcp.Required(), mcp.Description("Resource kind")),
-		mcp.WithString("name", mcp.Required(), mcp.Description("Resource name")),
+		mcp.WithString("resource", mcp.Required(), mcp.Description("Resource name in the API sense, lowercase plural (e.g., 'pods', 'deployments'). NOT the Kind.")),
+		mcp.WithString("name", mcp.Required(), mcp.Description("Resource instance name")),
 		mcp.WithString("namespace", mcp.Description("Namespace")),
 		mcp.WithString("patch_type", mcp.Required(), mcp.Description("Patch type: 'strategic', 'merge', or 'json'")),
 		mcp.WithString("patch", mcp.Required(), mcp.Description("Patch content (YAML or JSON)")),
@@ -127,19 +135,20 @@ func (m *Manager) handlePatchResource(ctx context.Context, request mcp.CallToolR
 	args := request.GetArguments()
 
 	k8sContext := m.getContextParam(args)
-	group, _ := args["group"].(string)
-	version, _ := args["version"].(string)
-	kind, _ := args["kind"].(string)
 	name, _ := args["name"].(string)
 	namespace, _ := args["namespace"].(string)
 	patchTypeStr, _ := args["patch_type"].(string)
 	patchData, _ := args["patch"].(string)
+	gvr := gvrFromArgs(args)
+	if err := validateGVR(gvr); err != nil {
+		return errorResult(err), nil
+	}
 
 	// Check authorization
 	if err := m.checkAuthorization(request, "patch_resource", k8sContext, namespace, authorization.ResourceInfo{
-		Group:    group,
-		Version:  version,
-		Resource: kindToResource(kind),
+		Group:    gvr.Group,
+		Version:  gvr.Version,
+		Resource: gvr.Resource,
 		Name:     name,
 	}); err != nil {
 		return errorResult(err), nil
@@ -182,8 +191,6 @@ func (m *Manager) handlePatchResource(ctx context.Context, request mcp.CallToolR
 		}
 	}
 
-	gvr := getGVR(group, version, kind)
-
 	var result *unstructured.Unstructured
 	if namespace != "" {
 		result, err = client.DynamicClient.Resource(gvr).Namespace(namespace).Patch(ctx, name, patchType, patchBytes, metav1.PatchOptions{})
@@ -200,7 +207,7 @@ func (m *Manager) handlePatchResource(ctx context.Context, request mcp.CallToolR
 		return errorResult(err), nil
 	}
 
-	return successResult(fmt.Sprintf("Successfully patched %s/%s\n\n%s", kind, name, yamlOutput)), nil
+	return successResult(fmt.Sprintf("Successfully patched %s/%s\n\n%s", gvr.Resource, name, yamlOutput)), nil
 }
 
 func (m *Manager) registerDeleteResource() {
@@ -209,8 +216,8 @@ func (m *Manager) registerDeleteResource() {
 		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
 		mcp.WithString("group", mcp.Description("API group")),
 		mcp.WithString("version", mcp.Required(), mcp.Description("API version")),
-		mcp.WithString("kind", mcp.Required(), mcp.Description("Resource kind")),
-		mcp.WithString("name", mcp.Required(), mcp.Description("Resource name")),
+		mcp.WithString("resource", mcp.Required(), mcp.Description("Resource name in the API sense, lowercase plural (e.g., 'pods', 'deployments'). NOT the Kind.")),
+		mcp.WithString("name", mcp.Required(), mcp.Description("Resource instance name")),
 		mcp.WithString("namespace", mcp.Description("Namespace")),
 		mcp.WithNumber("grace_period_seconds", mcp.Description("Grace period in seconds")),
 		mcp.WithString("propagation_policy", mcp.Description("Deletion propagation policy: 'Orphan', 'Background', 'Foreground'")),
@@ -222,17 +229,18 @@ func (m *Manager) handleDeleteResource(ctx context.Context, request mcp.CallTool
 	args := request.GetArguments()
 
 	k8sContext := m.getContextParam(args)
-	group, _ := args["group"].(string)
-	version, _ := args["version"].(string)
-	kind, _ := args["kind"].(string)
 	name, _ := args["name"].(string)
 	namespace, _ := args["namespace"].(string)
+	gvr := gvrFromArgs(args)
+	if err := validateGVR(gvr); err != nil {
+		return errorResult(err), nil
+	}
 
 	// Check authorization
 	if err := m.checkAuthorization(request, "delete_resource", k8sContext, namespace, authorization.ResourceInfo{
-		Group:    group,
-		Version:  version,
-		Resource: kindToResource(kind),
+		Group:    gvr.Group,
+		Version:  gvr.Version,
+		Resource: gvr.Resource,
 		Name:     name,
 	}); err != nil {
 		return errorResult(err), nil
@@ -247,7 +255,6 @@ func (m *Manager) handleDeleteResource(ctx context.Context, request mcp.CallTool
 		return errorResult(err), nil
 	}
 
-	gvr := getGVR(group, version, kind)
 	deleteOpts := getDeleteOptions(args)
 
 	if namespace != "" {
@@ -260,7 +267,7 @@ func (m *Manager) handleDeleteResource(ctx context.Context, request mcp.CallTool
 		return errorResult(err), nil
 	}
 
-	return successResult(fmt.Sprintf("Successfully deleted %s/%s in namespace %s", kind, name, namespace)), nil
+	return successResult(fmt.Sprintf("Successfully deleted %s/%s in namespace %s", gvr.Resource, name, namespace)), nil
 }
 
 func (m *Manager) registerDeleteResources() {
@@ -269,7 +276,7 @@ func (m *Manager) registerDeleteResources() {
 		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
 		mcp.WithString("group", mcp.Description("API group")),
 		mcp.WithString("version", mcp.Required(), mcp.Description("API version")),
-		mcp.WithString("kind", mcp.Required(), mcp.Description("Resource kind")),
+		mcp.WithString("resource", mcp.Required(), mcp.Description("Resource name in the API sense, lowercase plural (e.g., 'pods', 'deployments'). NOT the Kind.")),
 		mcp.WithString("namespace", mcp.Description("Namespace")),
 		mcp.WithString("label_selector", mcp.Description("Label selector")),
 		mcp.WithString("field_selector", mcp.Description("Field selector")),
@@ -282,12 +289,13 @@ func (m *Manager) handleDeleteResources(ctx context.Context, request mcp.CallToo
 	args := request.GetArguments()
 
 	k8sContext := m.getContextParam(args)
-	group, _ := args["group"].(string)
-	version, _ := args["version"].(string)
-	kind, _ := args["kind"].(string)
 	namespace, _ := args["namespace"].(string)
 	labelSelector, _ := args["label_selector"].(string)
 	fieldSelector, _ := args["field_selector"].(string)
+	gvr := gvrFromArgs(args)
+	if err := validateGVR(gvr); err != nil {
+		return errorResult(err), nil
+	}
 
 	// Require at least one selector for safety
 	if labelSelector == "" && fieldSelector == "" {
@@ -296,9 +304,9 @@ func (m *Manager) handleDeleteResources(ctx context.Context, request mcp.CallToo
 
 	// Check authorization
 	if err := m.checkAuthorization(request, "delete_resources", k8sContext, namespace, authorization.ResourceInfo{
-		Group:    group,
-		Version:  version,
-		Resource: kindToResource(kind),
+		Group:    gvr.Group,
+		Version:  gvr.Version,
+		Resource: gvr.Resource,
 	}); err != nil {
 		return errorResult(err), nil
 	}
@@ -312,7 +320,6 @@ func (m *Manager) handleDeleteResources(ctx context.Context, request mcp.CallToo
 		return errorResult(err), nil
 	}
 
-	gvr := getGVR(group, version, kind)
 	listOpts := getListOptions(args)
 	deleteOpts := getDeleteOptions(args)
 
@@ -326,5 +333,5 @@ func (m *Manager) handleDeleteResources(ctx context.Context, request mcp.CallToo
 		return errorResult(err), nil
 	}
 
-	return successResult(fmt.Sprintf("Successfully deleted %s resources matching selector in namespace %s", kind, namespace)), nil
+	return successResult(fmt.Sprintf("Successfully deleted %s resources matching selector in namespace %s", gvr.Resource, namespace)), nil
 }

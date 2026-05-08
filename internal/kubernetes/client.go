@@ -28,19 +28,25 @@ import (
 	"kubernetes-mcp/api"
 
 	"github.com/fsnotify/fsnotify"
+	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/client-go/discovery"
+	memcache "k8s.io/client-go/discovery/cached/memory"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/restmapper"
 	"k8s.io/client-go/tools/clientcmd"
 	metricsv "k8s.io/metrics/pkg/client/clientset/versioned"
 )
 
 // Client holds all the kubernetes clients for a single context
 type Client struct {
-	Config        *rest.Config
-	Clientset     *kubernetes.Clientset
-	DynamicClient dynamic.Interface
-	MetricsClient *metricsv.Clientset
+	Config          *rest.Config
+	Clientset       *kubernetes.Clientset
+	DynamicClient   dynamic.Interface
+	MetricsClient   *metricsv.Clientset
+	DiscoveryClient discovery.CachedDiscoveryInterface
+	RESTMapper      meta.ResettableRESTMapper
 }
 
 // ClientManager manages multiple kubernetes clients for different contexts
@@ -119,7 +125,42 @@ func NewClientManager(logger *slog.Logger, config *api.KubernetesConfig) (*Clien
 	// Start watching for file changes
 	go cm.watchFiles()
 
+	// Start periodic discovery cache refresh
+	go cm.refreshDiscoveryLoop()
+
 	return cm, nil
+}
+
+// refreshDiscoveryLoop periodically resets the RESTMapper / discovery cache
+// of every client so newly installed CRDs and API changes get picked up.
+// RESTMapper.Reset() also calls Invalidate() on the underlying cached
+// discovery client, so we don't need to invalidate it separately.
+func (cm *ClientManager) refreshDiscoveryLoop() {
+	interval := cm.config.Discovery.RefreshInterval
+	if interval <= 0 {
+		interval = 10 * time.Minute
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-cm.stopChan:
+			return
+		case <-ticker.C:
+			cm.mutex.RLock()
+			clients := make([]*Client, 0, len(cm.clients))
+			for _, c := range cm.clients {
+				clients = append(clients, c)
+			}
+			cm.mutex.RUnlock()
+			for _, c := range clients {
+				if c.RESTMapper != nil {
+					c.RESTMapper.Reset()
+				}
+			}
+			cm.logger.Debug("refreshed kubernetes discovery cache", "clients", len(clients))
+		}
+	}
 }
 
 // loadContextsFromDir loads kubeconfig files from a directory
@@ -419,11 +460,17 @@ func (cm *ClientManager) createClient(name string, ctxConfig api.KubernetesConte
 		metricsClient = nil
 	}
 
+	// Create cached discovery client and lazy RESTMapper
+	cachedDiscovery := memcache.NewMemCacheClient(clientset.Discovery())
+	mapper := restmapper.NewDeferredDiscoveryRESTMapper(cachedDiscovery)
+
 	return &Client{
-		Config:        restConfig,
-		Clientset:     clientset,
-		DynamicClient: dynamicClient,
-		MetricsClient: metricsClient,
+		Config:          restConfig,
+		Clientset:       clientset,
+		DynamicClient:   dynamicClient,
+		MetricsClient:   metricsClient,
+		DiscoveryClient: cachedDiscovery,
+		RESTMapper:      mapper,
 	}, nil
 }
 

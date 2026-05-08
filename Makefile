@@ -73,6 +73,42 @@ lint: golangci-lint ## Run golangci-lint linter & yamllint
 lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes
 	$(GOLANGCI_LINT) run --fix
 
+##@ Testing
+
+# Kind cluster used by `make test-e2e`. Override to point at a different
+# cluster, e.g. `make test-e2e KIND_CLUSTER=my-cluster`.
+KIND_CLUSTER     ?= kmcp-e2e
+KIND_K8S_VERSION ?= v1.31.0
+KIND_NODE_IMAGE  ?= kindest/node:$(KIND_K8S_VERSION)
+
+.PHONY: test
+test: ## Run unit tests (no cluster needed).
+	go test ./...
+
+.PHONY: kind-up
+kind-up: ## Create a local Kind cluster used by e2e tests (idempotent).
+	@if ! command -v kind >/dev/null 2>&1; then \
+		echo "kind is not installed. Install it from https://kind.sigs.k8s.io/"; exit 1; \
+	fi
+	@if ! kind get clusters 2>/dev/null | grep -qx "$(KIND_CLUSTER)"; then \
+		echo "Creating Kind cluster $(KIND_CLUSTER) ($(KIND_NODE_IMAGE))..."; \
+		kind create cluster --name $(KIND_CLUSTER) --image $(KIND_NODE_IMAGE); \
+	else \
+		echo "Kind cluster $(KIND_CLUSTER) already exists, reusing."; \
+	fi
+
+.PHONY: kind-down
+kind-down: ## Delete the local Kind cluster used by e2e tests.
+	@kind delete cluster --name $(KIND_CLUSTER) || true
+
+.PHONY: test-e2e
+test-e2e: kind-up ## Run end-to-end tests against the Kind cluster.
+	KMCP_E2E_CONTEXT=kind-$(KIND_CLUSTER) \
+	go test -tags=e2e -v -timeout 10m ./internal/k8stools/...
+
+.PHONY: test-e2e-clean
+test-e2e-clean: kind-down kind-up test-e2e kind-down ## Run e2e tests starting from a fresh Kind cluster.
+
 ##@ Build
 .PHONY: swagger
 swagger: install-swag ## Build Swagger documents.

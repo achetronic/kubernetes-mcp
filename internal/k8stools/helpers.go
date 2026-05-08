@@ -20,12 +20,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	"kubernetes-mcp/internal/authorization"
+	"kubernetes-mcp/internal/kubernetes"
 	"kubernetes-mcp/internal/middlewares"
 
 	"github.com/mark3labs/mcp-go/mcp"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/yaml"
@@ -104,31 +105,56 @@ func (m *Manager) applyYQExpressions(yamlData string, args map[string]any) (stri
 	return m.yq.Evaluate(yamlData, expressions)
 }
 
-// kindToResource converts a Kind name to the plural lowercase resource name
-func kindToResource(kind string) string {
-	resource := strings.ToLower(kind)
-	switch resource {
-	case "ingress":
-		return "ingresses"
-	case "networkpolicy":
-		return "networkpolicies"
-	case "endpoints":
-		return "endpoints"
-	default:
-		if !strings.HasSuffix(resource, "s") {
-			resource += "s"
-		}
-		return resource
-	}
+// gvrFromArgs builds a GroupVersionResource directly from tool arguments.
+// The model is expected to provide the resource as the lowercase plural
+// (e.g. "pods", "deployments", "ingresses"). No Kind -> Resource heuristic.
+func gvrFromArgs(args map[string]any) schema.GroupVersionResource {
+	group, _ := args["group"].(string)
+	version, _ := args["version"].(string)
+	resource, _ := args["resource"].(string)
+	return schema.GroupVersionResource{Group: group, Version: version, Resource: resource}
 }
 
-// getGVR builds a GroupVersionResource from parameters
-func getGVR(group, version, kind string) schema.GroupVersionResource {
-	return schema.GroupVersionResource{
-		Group:    group,
-		Version:  version,
-		Resource: kindToResource(kind),
+// validateGVR returns a descriptive error if a GVR is missing required fields.
+// Group is allowed to be empty (core API). Used by tool handlers to surface a
+// clear error to the model when it forgot to pass `version` or `resource`, or
+// (commonly) sent a Kind like "Pod" in the `resource` field.
+func validateGVR(gvr schema.GroupVersionResource) error {
+	if gvr.Version == "" {
+		return fmt.Errorf("missing required parameter: version (e.g. \"v1\")")
 	}
+	if gvr.Resource == "" {
+		return fmt.Errorf("missing required parameter: resource (lowercase plural, e.g. \"pods\", \"deployments\", \"ingresses\" — NOT the Kind)")
+	}
+	// Catch the most common mistake: sending a Kind in `resource`.
+	first := gvr.Resource[0]
+	if first >= 'A' && first <= 'Z' {
+		return fmt.Errorf("parameter `resource` must be the lowercase plural form (e.g. \"pods\", \"deployments\"), not the Kind %q", gvr.Resource)
+	}
+	return nil
+}
+
+// resolveGVRForGVK resolves a GroupVersionKind to its real GroupVersionResource
+// and namespaced flag using the cluster's discovery API via the RESTMapper.
+// This is used by tools that receive a manifest (apply_manifest, diff_manifest)
+// where the user provides Kind, not Resource.
+func (m *Manager) resolveGVRForGVK(client *kubernetes.Client, gvk schema.GroupVersionKind) (schema.GroupVersionResource, bool, error) {
+	mapping, err := client.RESTMapper.RESTMapping(gvk.GroupKind(), gvk.Version)
+	if err != nil {
+		return schema.GroupVersionResource{}, false, fmt.Errorf("failed to map %s to a resource via discovery: %w", gvk.String(), err)
+	}
+	return mapping.Resource, mapping.Scope.Name() == meta.RESTScopeNameNamespace, nil
+}
+
+// resolveKindForGVR resolves the Kind for a GroupVersionResource using the
+// RESTMapper. Used when a tool needs the Kind (e.g. describe_resource filters
+// related events by involvedObject.kind) but the user only provides a GVR.
+func (m *Manager) resolveKindForGVR(client *kubernetes.Client, gvr schema.GroupVersionResource) (string, error) {
+	gvk, err := client.RESTMapper.KindFor(gvr)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve kind for %s via discovery: %w", gvr.String(), err)
+	}
+	return gvk.Kind, nil
 }
 
 // objectToYAML converts an unstructured object to YAML

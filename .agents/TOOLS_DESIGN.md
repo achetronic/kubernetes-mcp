@@ -6,13 +6,24 @@ Proposal for tools to interact with Kubernetes intelligently.
 
 ### Resource Identification
 
+All tools use a **GroupVersionResource (GVR)** style of addressing — this is what the
+Kubernetes dynamic client expects natively. The model never has to pluralize a Kind:
+it just uses the resource name as it appears in the API path (the same word kubectl
+shows in `kubectl api-resources` under `NAME`).
+
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `group` | string | No | API group (e.g., `apps`, `batch`, `""` for core) |
 | `version` | string | Yes | API version (e.g., `v1`, `v1beta1`) |
-| `kind` | string | Yes | Resource type (e.g., `Pod`, `Deployment`) |
-| `name` | string | Varies | Resource name |
+| `resource` | string | Yes | Resource name in the API sense, lowercase plural (`pods`, `deployments`, `ingresses`, `networkpolicies`). NOT the Kind. |
+| `name` | string | Varies | Resource instance name |
 | `namespace` | string | No | Namespace (empty = all or cluster-scoped) |
+
+> Tools that take a full manifest (`apply_manifest`, `diff_manifest`) accept the
+> standard `kind:` field inside the manifest. Internally they resolve the GVR
+> through the cluster's discovery API via the RESTMapper, so CRDs and
+> irregular plurals (e.g. `StorageClass` → `storageclasses`) work without any
+> heuristics.
 
 ### Filtering and Selection
 
@@ -40,7 +51,7 @@ Gets a specific resource by name.
 params:
   - group: string (optional)
   - version: string (required)
-  - kind: string (required)
+  - resource: string (required, plural lowercase: pods, deployments, ...)
   - name: string (required)
   - namespace: string (optional)
   - yq_expressions: []string (optional)
@@ -50,7 +61,7 @@ params:
 ```
 group: ""
 version: v1
-kind: Pod
+resource: pods
 name: nginx-abc123
 namespace: default
 yq_expressions: [".status.podIP"]
@@ -65,7 +76,7 @@ Lists resources with optional filters.
 params:
   - group: string (optional)
   - version: string (required)
-  - kind: string (required)
+  - resource: string (required, plural lowercase)
   - namespace: string (optional, empty = all namespaces)
   - field_selector: string (optional)
   - label_selector: string (optional)
@@ -75,7 +86,7 @@ params:
 **Example:** List Running Pods and extract names
 ```
 version: v1
-kind: Pod
+resource: pods
 namespace: production
 field_selector: "status.phase=Running"
 label_selector: "app=api"
@@ -91,20 +102,23 @@ Gets detailed information about a resource (including events).
 params:
   - group: string (optional)
   - version: string (required)
-  - kind: string (required)
+  - resource: string (required, plural lowercase)
   - name: string (required)
   - namespace: string (optional)
   - yq_expressions: []string (optional)
 ```
 
-**Note:** Combines the resource + related events in a single output.
+**Note:** Combines the resource + related events in a single output. The Kind
+used to filter events is resolved automatically from the GVR via the RESTMapper.
 
 ---
 
 ### 2. Modification
 
 #### `apply_manifest`
-Applies a YAML/JSON manifest (create or update).
+Applies a YAML/JSON manifest (create or update). The manifest uses the standard
+Kubernetes `kind:` field — the GVR (and namespaced flag) is resolved automatically
+through the cluster's discovery API via the RESTMapper.
 
 ```yaml
 params:
@@ -133,7 +147,7 @@ Applies a patch to an existing resource.
 params:
   - group: string (optional)
   - version: string (required)
-  - kind: string (required)
+  - resource: string (required, plural lowercase)
   - name: string (required)
   - namespace: string (optional)
   - patch_type: string (required: "strategic", "merge", "json")
@@ -144,7 +158,7 @@ params:
 ```
 group: apps
 version: v1
-kind: Deployment
+resource: deployments
 name: nginx
 namespace: default
 patch_type: strategic
@@ -166,7 +180,7 @@ Deletes a resource.
 params:
   - group: string (optional)
   - version: string (required)
-  - kind: string (required)
+  - resource: string (required, plural lowercase)
   - name: string (required)
   - namespace: string (optional)
   - grace_period_seconds: int (optional, default: per resource)
@@ -182,7 +196,7 @@ Deletes multiple resources with selectors.
 params:
   - group: string (optional)
   - version: string (required)
-  - kind: string (required)
+  - resource: string (required, plural lowercase)
   - namespace: string (optional)
   - field_selector: string (optional)
   - label_selector: string (required, at least one selector)
@@ -192,7 +206,7 @@ params:
 **Example:** Delete all Pods with label `temp=true`
 ```
 version: v1
-kind: Pod
+resource: pods
 namespace: default
 label_selector: "temp=true"
 ```
@@ -208,7 +222,7 @@ Scales a resource (Deployment, ReplicaSet, StatefulSet).
 params:
   - group: string (optional, default: "apps")
   - version: string (required)
-  - kind: string (required)
+  - resource: string (required, plural lowercase: deployments, statefulsets, replicasets)
   - name: string (required)
   - namespace: string (optional)
   - replicas: int (required)
@@ -225,7 +239,7 @@ Gets the status of a rollout.
 params:
   - group: string (optional, default: "apps")
   - version: string (required)
-  - kind: string (required: Deployment, DaemonSet, StatefulSet)
+  - resource: string (required, plural lowercase: deployments, daemonsets, statefulsets)
   - name: string (required)
   - namespace: string (optional)
 ```
@@ -239,7 +253,7 @@ Restarts a rollout (triggers redeploy).
 params:
   - group: string (optional, default: "apps")
   - version: string (required)
-  - kind: string (required: Deployment, DaemonSet, StatefulSet)
+  - resource: string (required, plural lowercase: deployments, daemonsets, statefulsets)
   - name: string (required)
   - namespace: string (optional)
 ```
@@ -253,7 +267,7 @@ Reverts to a previous revision.
 params:
   - group: string (optional, default: "apps")
   - version: string (required)
-  - kind: string (required: Deployment, DaemonSet, StatefulSet)
+  - resource: string (required, plural lowercase: deployments, daemonsets, statefulsets)
   - name: string (required)
   - namespace: string (optional)
   - to_revision: int (optional, default: previous revision)

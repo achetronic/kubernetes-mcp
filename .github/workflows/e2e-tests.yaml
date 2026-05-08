@@ -1,0 +1,39 @@
+name: E2E tests
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  e2e:
+    name: e2e (k8s ${{ matrix.k8s }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        k8s:
+          - v1.31.0
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Create Kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: kmcp-e2e
+          node_image: kindest/node:${{ matrix.k8s }}
+          wait: 120s
+
+      - name: Run e2e tests
+        env:
+          KMCP_E2E_CONTEXT: kind-kmcp-e2e
+        run: go test -tags=e2e -v -timeout 10m ./internal/k8stools/...

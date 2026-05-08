@@ -164,6 +164,12 @@ configMaps:
           # Kubeconfig files are watched for changes and clients are reloaded automatically
           # contexts_dir: "/etc/kubernetes/clusters/"
 
+          # Discovery cache controls how often the API discovery results (used by
+          # the RESTMapper to resolve Kind -> Resource for apply_manifest /
+          # diff_manifest) are refreshed. Defaults to 10m if omitted.
+          discovery:
+            refresh_interval: "10m"
+
           tools:
             bulk_operations:
               max_resources_per_operation: 100
