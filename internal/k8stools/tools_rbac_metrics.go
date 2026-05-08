@@ -50,13 +50,22 @@ func metricsServerError(err error) error {
 
 func (m *Manager) registerCheckPermission() {
 	tool := mcp.NewTool(m.toolName("check_permission"),
-		mcp.WithDescription("Checks if an action is allowed (SelfSubjectAccessReview)"),
-		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
-		mcp.WithString("verb", mcp.Required(), mcp.Description("Verb to check: get, list, create, update, delete, etc.")),
-		mcp.WithString("group", mcp.Description("API group")),
-		mcp.WithString("resource", mcp.Required(), mcp.Description("Resource type")),
-		mcp.WithString("name", mcp.Description("Resource name (optional)")),
-		mcp.WithString("namespace", mcp.Description("Namespace (optional)")),
+		mcp.WithDescription(`Ask the API server whether the identity behind the kubeconfig is allowed
+to perform a given verb on a given resource (Kubernetes
+SelfSubjectAccessReview).
+
+Verifies the cluster's native RBAC. Note that this is independent from the
+MCP server's own authorization layer (which is checked first, before the
+call ever reaches the cluster).
+
+Useful as a pre-flight check before destructive operations, or to debug
+"Forbidden" errors.`),
+		mcp.WithString("context", mcp.Description("Kubernetes context to target. If empty, uses the currently active MCP context.")),
+		mcp.WithString("verb", mcp.Required(), mcp.Description("RBAC verb to check. Standard values: 'get', 'list', 'watch', 'create', 'update', 'patch', 'delete', 'deletecollection'. Some resources accept extra verbs (e.g. 'use' on PodSecurityPolicies, 'bind' on ClusterRoles, 'impersonate' on Users).")),
+		mcp.WithString("group", mcp.Description("API group of the resource being checked. Empty string \"\" for the core API.")),
+		mcp.WithString("resource", mcp.Required(), mcp.Description("Resource name in the API sense: lowercase plural ('pods', 'deployments', 'secrets'). NOT the Kind. Subresources can be checked as 'pods/exec', 'pods/log', 'deployments/scale'.")),
+		mcp.WithString("name", mcp.Description("Optional resource instance name. When set, the check applies to that specific object; when empty, the check is for the resource type as a whole.")),
+		mcp.WithString("namespace", mcp.Description("Namespace where the check applies. Empty for cluster-scoped checks or for checks across all namespaces.")),
 	)
 	m.mcpServer.AddTool(tool, m.handleCheckPermission)
 }
@@ -127,12 +136,22 @@ func (m *Manager) handleCheckPermission(ctx context.Context, request mcp.CallToo
 
 func (m *Manager) registerGetPodMetrics() {
 	tool := mcp.NewTool(m.toolName("get_pod_metrics"),
-		mcp.WithDescription("Gets CPU and memory usage for pods (requires metrics-server)"),
-		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
-		mcp.WithString("namespace", mcp.Description("Namespace (optional)")),
-		mcp.WithString("name", mcp.Description("Pod name (optional, lists all if empty)")),
-		mcp.WithString("label_selector", mcp.Description("Label selector")),
-		mcp.WithArray("yq_expressions", mcp.Description(`Array of yq expressions (https://mikefarah.gitbook.io/yq) to filter/transform the YAML output. Applied sequentially. Examples: '.items[].metadata.name' (get pod names), '.items[].containers[].usage' (get resource usage), '.items[] | select(.containers[].usage.cpu > "100m")' (filter high CPU)`)),
+		mcp.WithDescription(`Return live CPU and memory usage for one Pod or many Pods.
+
+Requires metrics-server to be installed in the cluster. If it is not, the
+tool returns a clear "metrics-server is not available" error.
+
+Selection rules:
+  - 'name' set: returns metrics for that specific Pod (uses 'namespace',
+    defaulting to 'default' if empty).
+  - 'name' empty + 'namespace' set: lists metrics for all Pods in that
+    namespace, optionally filtered by 'label_selector'.
+  - both empty: lists Pod metrics across all namespaces (subject to RBAC).`),
+		mcp.WithString("context", mcp.Description("Kubernetes context to target. If empty, uses the currently active MCP context.")),
+		mcp.WithString("namespace", mcp.Description("Namespace to scope the query to. See selection rules in the description.")),
+		mcp.WithString("name", mcp.Description("Specific Pod name. If set, the response is a single PodMetrics object instead of a list.")),
+		mcp.WithString("label_selector", mcp.Description("Kubernetes label selector. Only applied to the list flavours (when 'name' is empty).")),
+		mcp.WithArray("yq_expressions", mcp.Description("Optional yq expressions applied to the YAML output. List flavour returns a PodMetricsList (use '.items[]'); single flavour returns a PodMetrics object. Examples: '.items[] | {pod: .metadata.name, cpu: .containers[0].usage.cpu}' (compact), '.items[].metadata.name' (just names).")),
 	)
 	m.mcpServer.AddTool(tool, m.handleGetPodMetrics)
 }
@@ -207,11 +226,18 @@ func (m *Manager) handleGetPodMetrics(ctx context.Context, request mcp.CallToolR
 
 func (m *Manager) registerGetNodeMetrics() {
 	tool := mcp.NewTool(m.toolName("get_node_metrics"),
-		mcp.WithDescription("Gets CPU and memory usage for nodes (requires metrics-server)"),
-		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
-		mcp.WithString("name", mcp.Description("Node name (optional, lists all if empty)")),
-		mcp.WithString("label_selector", mcp.Description("Label selector")),
-		mcp.WithArray("yq_expressions", mcp.Description("Array of yq expressions (https://mikefarah.gitbook.io/yq) to filter/transform the YAML output. Applied sequentially. Examples: '.items[] | {name: .metadata.name, cpu: .usage.cpu, memory: .usage.memory}' (reshape output), '.items[].usage' (get all usage data)")),
+		mcp.WithDescription(`Return live CPU and memory usage for one Node or all Nodes.
+
+Requires metrics-server to be installed in the cluster. If it is not, the
+tool returns a clear "metrics-server is not available" error.
+
+  - 'name' set: returns metrics for that specific Node.
+  - 'name' empty: lists metrics for every Node, optionally filtered by
+    'label_selector'.`),
+		mcp.WithString("context", mcp.Description("Kubernetes context to target. If empty, uses the currently active MCP context.")),
+		mcp.WithString("name", mcp.Description("Specific Node name. If set, the response is a single NodeMetrics object instead of a list.")),
+		mcp.WithString("label_selector", mcp.Description("Kubernetes label selector. Only applied to the list flavour (when 'name' is empty). Examples: 'node-role.kubernetes.io/control-plane=', 'topology.kubernetes.io/zone=eu-west-1a'.")),
+		mcp.WithArray("yq_expressions", mcp.Description("Optional yq expressions applied to the YAML output. List flavour returns a NodeMetricsList (use '.items[]'); single flavour returns a NodeMetrics object. Examples: '.items[] | {name: .metadata.name, cpu: .usage.cpu, memory: .usage.memory}' (compact), '.items[].metadata.name' (just names).")),
 	)
 	m.mcpServer.AddTool(tool, m.handleGetNodeMetrics)
 }

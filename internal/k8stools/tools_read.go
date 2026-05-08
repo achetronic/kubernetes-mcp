@@ -28,14 +28,22 @@ import (
 
 func (m *Manager) registerGetResource() {
 	tool := mcp.NewTool(m.toolName("get_resource"),
-		mcp.WithDescription("Gets a specific Kubernetes resource by name"),
-		mcp.WithString("context", mcp.Description("Kubernetes context to use (optional, uses current if not specified)")),
-		mcp.WithString("group", mcp.Description("API group (e.g., 'apps', 'batch', empty for core)")),
-		mcp.WithString("version", mcp.Required(), mcp.Description("API version (e.g., 'v1', 'v1beta1')")),
-		mcp.WithString("resource", mcp.Required(), mcp.Description("Resource name in the API sense, lowercase plural (e.g., 'pods', 'deployments', 'ingresses', 'networkpolicies'). NOT the Kind.")),
-		mcp.WithString("name", mcp.Required(), mcp.Description("Resource instance name")),
-		mcp.WithString("namespace", mcp.Description("Namespace (optional for cluster-scoped resources)")),
-		mcp.WithArray("yq_expressions", mcp.Description("Array of yq expressions (https://mikefarah.gitbook.io/yq) to filter/transform the YAML output. Applied sequentially. Examples: '.metadata.name' (get name), '.spec.containers[].image' (get all container images), 'select(.status.phase == \"Running\")' (filter by condition), '.items[] | {name: .metadata.name, status: .status.phase}' (reshape output)")),
+		mcp.WithDescription(`Fetch a single Kubernetes resource by name and return its full YAML.
+
+Use this when you already know the exact name and type of the resource.
+For listing many resources at once use 'list_resources'. For a richer
+human-readable view including related events use 'describe_resource'.
+
+The resource is addressed via GroupVersionResource (GVR), exactly as the
+Kubernetes API expects. The plural lowercase form ('pods', 'deployments',
+'ingresses', 'storageclasses', ...) is required, NOT the Kind.`),
+		mcp.WithString("context", mcp.Description("Kubernetes context to target. If empty, uses the currently active MCP context (see 'get_current_context').")),
+		mcp.WithString("group", mcp.Description("API group. Empty string \"\" for the core API ('pods', 'configmaps', ...). Examples: 'apps', 'batch', 'networking.k8s.io'.")),
+		mcp.WithString("version", mcp.Required(), mcp.Description("API version, e.g. 'v1', 'v1beta1', 'v2'.")),
+		mcp.WithString("resource", mcp.Required(), mcp.Description("Resource name in the API sense: lowercase plural ('pods', 'deployments', 'ingresses', 'networkpolicies', 'storageclasses'). NOT the Kind ('Pod', 'Deployment', ...). Run 'list_api_resources' if unsure.")),
+		mcp.WithString("name", mcp.Required(), mcp.Description("Name of the specific resource instance to fetch.")),
+		mcp.WithString("namespace", mcp.Description("Namespace where the resource lives. Required for namespaced resources; ignored for cluster-scoped resources (Nodes, Namespaces, StorageClasses, ...).")),
+		mcp.WithArray("yq_expressions", mcp.Description("Optional yq expressions (see https://mikefarah.gitbook.io/yq) applied in order to filter or transform the YAML output. Useful to keep the response small. Examples: '.metadata.name' (just the name), '.spec.containers[].image' (image list), '.status.podIP' (IP address), '{name: .metadata.name, ip: .status.podIP}' (custom shape).")),
 	)
 	m.mcpServer.AddTool(tool, m.handleGetResource)
 }
@@ -98,15 +106,23 @@ func (m *Manager) handleGetResource(ctx context.Context, request mcp.CallToolReq
 
 func (m *Manager) registerListResources() {
 	tool := mcp.NewTool(m.toolName("list_resources"),
-		mcp.WithDescription("Lists Kubernetes resources with optional filters"),
-		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
-		mcp.WithString("group", mcp.Description("API group")),
-		mcp.WithString("version", mcp.Required(), mcp.Description("API version")),
-		mcp.WithString("resource", mcp.Required(), mcp.Description("Resource name in the API sense, lowercase plural (e.g., 'pods', 'deployments', 'ingresses'). NOT the Kind.")),
-		mcp.WithString("namespace", mcp.Description("Namespace (empty for all namespaces)")),
-		mcp.WithString("label_selector", mcp.Description("Label selector (e.g., 'app=nginx,env!=prod')")),
-		mcp.WithString("field_selector", mcp.Description("Field selector (e.g., 'metadata.name=foo')")),
-		mcp.WithArray("yq_expressions", mcp.Description("Array of yq expressions (https://mikefarah.gitbook.io/yq) to filter/transform the YAML output. Applied sequentially. Examples: '.metadata.name' (get name), '.spec.containers[].image' (get all container images), 'select(.status.phase == \"Running\")' (filter by condition), '.items[] | {name: .metadata.name, status: .status.phase}' (reshape output)")),
+		mcp.WithDescription(`List Kubernetes resources of a given type, optionally filtered by namespace,
+labels and fields.
+
+Prefer this over multiple 'get_resource' calls when scanning many objects.
+Use 'yq_expressions' to project just the fields you need; large clusters can
+return huge YAML and the model is not the right place to parse it.
+
+Resources are addressed via GroupVersionResource (GVR). The plural lowercase
+form ('pods', 'deployments', 'ingresses', ...) is required, NOT the Kind.`),
+		mcp.WithString("context", mcp.Description("Kubernetes context to target. If empty, uses the currently active MCP context.")),
+		mcp.WithString("group", mcp.Description("API group. Empty string \"\" for the core API. Examples: 'apps', 'networking.k8s.io', 'batch'.")),
+		mcp.WithString("version", mcp.Required(), mcp.Description("API version, e.g. 'v1', 'v1beta1'.")),
+		mcp.WithString("resource", mcp.Required(), mcp.Description("Resource name in the API sense: lowercase plural ('pods', 'deployments', 'ingresses'). NOT the Kind. Use 'list_api_resources' if unsure.")),
+		mcp.WithString("namespace", mcp.Description("Namespace to scope the listing to. Empty string lists across ALL namespaces (subject to RBAC) and is ignored for cluster-scoped resources.")),
+		mcp.WithString("label_selector", mcp.Description("Kubernetes label selector. Comma separates AND clauses. Examples: 'app=nginx', 'app=api,env!=prod', 'tier in (frontend,backend)'.")),
+		mcp.WithString("field_selector", mcp.Description("Kubernetes field selector. Only a small set of fields is selectable per resource type (typically 'metadata.name', 'metadata.namespace', 'status.phase', 'spec.nodeName'). Examples: 'status.phase=Running', 'metadata.name=foo'.")),
+		mcp.WithArray("yq_expressions", mcp.Description("Optional yq expressions applied in order to filter or transform the YAML output. The output is a List object so use '.items[]' to iterate. Examples: '.items[].metadata.name' (just names), '.items | length' (count), '.items[] | select(.status.phase == \"Running\") | .metadata.name' (filter+project), '.items[] | {name: .metadata.name, ip: .status.podIP}' (reshape).")),
 	)
 	m.mcpServer.AddTool(tool, m.handleListResources)
 }
@@ -169,14 +185,21 @@ func (m *Manager) handleListResources(ctx context.Context, request mcp.CallToolR
 
 func (m *Manager) registerDescribeResource() {
 	tool := mcp.NewTool(m.toolName("describe_resource"),
-		mcp.WithDescription("Gets detailed information about a resource including related events"),
-		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
-		mcp.WithString("group", mcp.Description("API group")),
-		mcp.WithString("version", mcp.Required(), mcp.Description("API version")),
-		mcp.WithString("resource", mcp.Required(), mcp.Description("Resource name in the API sense, lowercase plural (e.g., 'pods', 'deployments'). NOT the Kind.")),
-		mcp.WithString("name", mcp.Required(), mcp.Description("Resource instance name")),
-		mcp.WithString("namespace", mcp.Description("Namespace")),
-		mcp.WithArray("yq_expressions", mcp.Description("Array of yq expressions (https://mikefarah.gitbook.io/yq) to filter/transform the YAML output. Applied sequentially. Examples: '.metadata.name' (get name), '.spec.containers[].image' (get all container images), 'select(.status.phase == \"Running\")' (filter by condition), '.items[] | {name: .metadata.name, status: .status.phase}' (reshape output)")),
+		mcp.WithDescription(`Return a resource together with its related events, similar to 'kubectl describe'.
+
+Best when troubleshooting: events explain why a Pod is Pending, why a
+Deployment is not progressing, etc. The Kind used to filter events is
+resolved automatically from the GVR via the cluster's RESTMapper, so the
+caller only needs to provide the GVR.
+
+Events are only included when 'namespace' is set (the events API is namespaced).`),
+		mcp.WithString("context", mcp.Description("Kubernetes context to target. If empty, uses the currently active MCP context.")),
+		mcp.WithString("group", mcp.Description("API group. Empty string \"\" for the core API.")),
+		mcp.WithString("version", mcp.Required(), mcp.Description("API version, e.g. 'v1'.")),
+		mcp.WithString("resource", mcp.Required(), mcp.Description("Resource name in the API sense: lowercase plural ('pods', 'deployments'). NOT the Kind.")),
+		mcp.WithString("name", mcp.Required(), mcp.Description("Name of the specific resource instance.")),
+		mcp.WithString("namespace", mcp.Description("Namespace where the resource lives. Required for namespaced resources; ignored for cluster-scoped resources. Events are only included when this is set.")),
+		mcp.WithArray("yq_expressions", mcp.Description("Optional yq expressions applied to the combined YAML (resource + events). The events are appended after a '---' separator. Examples: '.status.conditions' (just conditions), '.spec.containers[].image' (image list).")),
 	)
 	m.mcpServer.AddTool(tool, m.handleDescribeResource)
 }

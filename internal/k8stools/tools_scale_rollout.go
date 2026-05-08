@@ -20,9 +20,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
+	"strconv"
 	"time"
 
 	"kubernetes-mcp/internal/authorization"
+	"kubernetes-mcp/internal/kubernetes"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -33,14 +36,20 @@ import (
 
 func (m *Manager) registerScaleResource() {
 	tool := mcp.NewTool(m.toolName("scale_resource"),
-		mcp.WithDescription("Scales a Deployment, ReplicaSet, or StatefulSet"),
-		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
-		mcp.WithString("group", mcp.Description("API group (default: apps)")),
-		mcp.WithString("version", mcp.Required(), mcp.Description("API version")),
-		mcp.WithString("resource", mcp.Required(), mcp.Description("Resource name in the API sense, lowercase plural (e.g., 'deployments', 'statefulsets', 'replicasets'). NOT the Kind.")),
-		mcp.WithString("name", mcp.Required(), mcp.Description("Resource instance name")),
-		mcp.WithString("namespace", mcp.Description("Namespace")),
-		mcp.WithNumber("replicas", mcp.Required(), mcp.Description("Desired number of replicas")),
+		mcp.WithDescription(`Set the number of replicas of a scalable workload (Deployment,
+StatefulSet, ReplicaSet, ...).
+
+Equivalent to 'kubectl scale --replicas=N'. Setting replicas to 0 stops
+the workload without deleting it; restoring the value brings it back.
+
+For non-scalable kinds (Pods, DaemonSets, ...) this call will fail.`),
+		mcp.WithString("context", mcp.Description("Kubernetes context to target. If empty, uses the currently active MCP context.")),
+		mcp.WithString("group", mcp.Description("API group. Defaults to 'apps' which covers Deployment / StatefulSet / ReplicaSet.")),
+		mcp.WithString("version", mcp.Required(), mcp.Description("API version, typically 'v1'.")),
+		mcp.WithString("resource", mcp.Required(), mcp.Description("Lowercase plural: 'deployments', 'statefulsets', 'replicasets'. NOT the Kind.")),
+		mcp.WithString("name", mcp.Required(), mcp.Description("Name of the workload to scale.")),
+		mcp.WithString("namespace", mcp.Description("Namespace where the workload lives. Required (these kinds are namespaced).")),
+		mcp.WithNumber("replicas", mcp.Required(), mcp.Description("Desired replica count. Must be an integer >= 0. Use 0 to stop the workload without deleting it.")),
 	)
 	m.mcpServer.AddTool(tool, m.handleScaleResource)
 }
@@ -111,13 +120,19 @@ func (m *Manager) handleScaleResource(ctx context.Context, request mcp.CallToolR
 
 func (m *Manager) registerGetRolloutStatus() {
 	tool := mcp.NewTool(m.toolName("get_rollout_status"),
-		mcp.WithDescription("Gets the status of a rollout"),
-		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
-		mcp.WithString("group", mcp.Description("API group (default: apps)")),
-		mcp.WithString("version", mcp.Required(), mcp.Description("API version")),
-		mcp.WithString("resource", mcp.Required(), mcp.Description("Resource name in the API sense, lowercase plural ('deployments', 'daemonsets', 'statefulsets'). NOT the Kind.")),
-		mcp.WithString("name", mcp.Required(), mcp.Description("Resource instance name")),
-		mcp.WithString("namespace", mcp.Description("Namespace")),
+		mcp.WithDescription(`Inspect the progress of a rollout for a Deployment, DaemonSet or
+StatefulSet.
+
+Reports desired vs ready / updated / available replicas, the observed
+generation (so you can see if the controller has picked up your latest
+change), and the resource's status conditions. Use this after applying
+a change to confirm the rollout has converged.`),
+		mcp.WithString("context", mcp.Description("Kubernetes context to target. If empty, uses the currently active MCP context.")),
+		mcp.WithString("group", mcp.Description("API group. Defaults to 'apps'.")),
+		mcp.WithString("version", mcp.Required(), mcp.Description("API version, typically 'v1'.")),
+		mcp.WithString("resource", mcp.Required(), mcp.Description("Lowercase plural: 'deployments', 'daemonsets', 'statefulsets'. NOT the Kind.")),
+		mcp.WithString("name", mcp.Required(), mcp.Description("Name of the workload.")),
+		mcp.WithString("namespace", mcp.Description("Namespace where the workload lives.")),
 	)
 	m.mcpServer.AddTool(tool, m.handleGetRolloutStatus)
 }
@@ -211,13 +226,21 @@ func (m *Manager) handleGetRolloutStatus(ctx context.Context, request mcp.CallTo
 
 func (m *Manager) registerRestartRollout() {
 	tool := mcp.NewTool(m.toolName("restart_rollout"),
-		mcp.WithDescription("Restarts a rollout by updating the restart annotation"),
-		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
-		mcp.WithString("group", mcp.Description("API group (default: apps)")),
-		mcp.WithString("version", mcp.Required(), mcp.Description("API version")),
-		mcp.WithString("resource", mcp.Required(), mcp.Description("Resource name in the API sense, lowercase plural ('deployments', 'daemonsets', 'statefulsets'). NOT the Kind.")),
-		mcp.WithString("name", mcp.Required(), mcp.Description("Resource instance name")),
-		mcp.WithString("namespace", mcp.Description("Namespace")),
+		mcp.WithDescription(`Trigger a rolling restart of a Deployment, DaemonSet or StatefulSet.
+
+Equivalent to 'kubectl rollout restart'. Implementation: writes a
+'kubectl.kubernetes.io/restartedAt' annotation on the pod template, which
+forces the controller to recreate the Pods using the controlled rollout
+strategy (no downtime if maxSurge / maxUnavailable are sane).
+
+Useful to pick up new images with the same tag, refresh secrets mounted
+as files, or clear a transient bad state without changing the spec.`),
+		mcp.WithString("context", mcp.Description("Kubernetes context to target. If empty, uses the currently active MCP context.")),
+		mcp.WithString("group", mcp.Description("API group. Defaults to 'apps'.")),
+		mcp.WithString("version", mcp.Required(), mcp.Description("API version, typically 'v1'.")),
+		mcp.WithString("resource", mcp.Required(), mcp.Description("Lowercase plural: 'deployments', 'daemonsets', 'statefulsets'. NOT the Kind.")),
+		mcp.WithString("name", mcp.Required(), mcp.Description("Name of the workload to restart.")),
+		mcp.WithString("namespace", mcp.Description("Namespace where the workload lives.")),
 	)
 	m.mcpServer.AddTool(tool, m.handleRestartRollout)
 }
@@ -288,14 +311,28 @@ func (m *Manager) handleRestartRollout(ctx context.Context, request mcp.CallTool
 
 func (m *Manager) registerUndoRollout() {
 	tool := mcp.NewTool(m.toolName("undo_rollout"),
-		mcp.WithDescription("Reverts a rollout to a previous revision"),
-		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
-		mcp.WithString("group", mcp.Description("API group (default: apps)")),
-		mcp.WithString("version", mcp.Required(), mcp.Description("API version")),
-		mcp.WithString("resource", mcp.Required(), mcp.Description("Resource name in the API sense, lowercase plural ('deployments', 'daemonsets', 'statefulsets'). NOT the Kind.")),
-		mcp.WithString("name", mcp.Required(), mcp.Description("Resource instance name")),
-		mcp.WithString("namespace", mcp.Description("Namespace")),
-		mcp.WithNumber("to_revision", mcp.Description("Revision to rollback to (default: previous revision)")),
+		mcp.WithDescription(`Roll a workload back to a previous revision.
+
+Supported resources (group 'apps'):
+  - 'deployments'  — uses ReplicaSet history
+  - 'statefulsets' — uses ControllerRevision history
+  - 'daemonsets'   — uses ControllerRevision history
+
+Behaviour:
+  - 'to_revision' omitted or 0: rolls back to the revision immediately
+    BEFORE the current one (revision N-1), matching 'kubectl rollout undo'.
+  - 'to_revision' set: rolls back to that exact revision number. The call
+    fails if the requested revision is the current one (no-op) or unknown.
+
+The pod template of the target revision is applied via a strategic-merge
+patch on 'spec.template'. Labels and selectors are not touched.`),
+		mcp.WithString("context", mcp.Description("Kubernetes context to target. If empty, uses the currently active MCP context.")),
+		mcp.WithString("group", mcp.Description("API group. Must be 'apps' (default).")),
+		mcp.WithString("version", mcp.Required(), mcp.Description("API version, typically 'v1'.")),
+		mcp.WithString("resource", mcp.Required(), mcp.Description("One of 'deployments', 'statefulsets', 'daemonsets'. Lowercase plural, NOT the Kind.")),
+		mcp.WithString("name", mcp.Required(), mcp.Description("Name of the workload to roll back.")),
+		mcp.WithString("namespace", mcp.Description("Namespace where the workload lives.")),
+		mcp.WithNumber("to_revision", mcp.Description("Specific revision number to roll back to. Omit or 0 to roll back to the revision immediately before the current one (kubectl-compatible default).")),
 	)
 	m.mcpServer.AddTool(tool, m.handleUndoRollout)
 }
@@ -338,80 +375,236 @@ func (m *Manager) handleUndoRollout(ctx context.Context, request mcp.CallToolReq
 		return errorResult(err), nil
 	}
 
-	// Currently only Deployments are supported (apps/deployments).
-	if !(gvr.Group == "apps" && gvr.Resource == "deployments") {
-		return errorResult(fmt.Errorf("undo rollout is only supported for apps/deployments")), nil
+	if gvr.Group != "apps" {
+		return errorResult(fmt.Errorf("undo rollout is only supported for apps/{deployments,statefulsets,daemonsets}; got %s/%s", gvr.Group, gvr.Resource)), nil
 	}
 
-	// Get the deployment
+	switch gvr.Resource {
+	case "deployments":
+		return m.undoDeploymentRollout(ctx, client, gvr, namespace, name, int64(toRevision))
+	case "statefulsets", "daemonsets":
+		return m.undoControllerRevisionRollout(ctx, client, gvr, namespace, name, int64(toRevision))
+	default:
+		return errorResult(fmt.Errorf("undo rollout is only supported for apps/{deployments,statefulsets,daemonsets}; got %s/%s", gvr.Group, gvr.Resource)), nil
+	}
+}
+
+// undoDeploymentRollout implements rollback for apps/v1 Deployments by walking
+// the ReplicaSets owned by the deployment and selecting the target revision.
+func (m *Manager) undoDeploymentRollout(
+	ctx context.Context,
+	client *kubernetes.Client,
+	gvr schema.GroupVersionResource,
+	namespace, name string,
+	toRevision int64,
+) (*mcp.CallToolResult, error) {
+
 	deployment, err := client.DynamicClient.Resource(gvr).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		return errorResult(err), nil
 	}
 
-	// Find ReplicaSets for this deployment
-	rsGVR := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "replicasets"}
-	selector, _, _ := unstructured.NestedString(deployment.Object, "spec", "selector", "matchLabels")
-	_ = selector // Use this to find matching ReplicaSets
+	currentRevision, _ := strconv.ParseInt(
+		nestedString(deployment.Object, "metadata", "annotations", "deployment.kubernetes.io/revision"),
+		10, 64,
+	)
 
+	rsGVR := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "replicasets"}
 	rsList, err := client.DynamicClient.Resource(rsGVR).Namespace(namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return errorResult(err), nil
 	}
 
-	// Find the ReplicaSet with the desired revision
-	var targetRS *unstructured.Unstructured
-	for _, item := range rsList.Items {
-		// Check owner references
-		ownerRefs, _, _ := unstructured.NestedSlice(item.Object, "metadata", "ownerReferences")
-		for _, ref := range ownerRefs {
-			if refMap, ok := ref.(map[string]any); ok {
-				if refName, _ := refMap["name"].(string); refName == name {
-					// Check revision annotation
-					annotations, _, _ := unstructured.NestedMap(item.Object, "metadata", "annotations")
-					if revision, ok := annotations["deployment.kubernetes.io/revision"].(string); ok {
-						if toRevision > 0 && revision == fmt.Sprintf("%d", int(toRevision)) {
-							targetRS = &item
-							break
-						} else if toRevision == 0 && targetRS == nil {
-							// Keep track of the latest RS for rollback
-							targetRS = &item
-						}
-					}
-				}
-			}
+	type rsRevision struct {
+		revision int64
+		obj      *unstructured.Unstructured
+	}
+
+	deploymentUID := nestedString(deployment.Object, "metadata", "uid")
+
+	var history []rsRevision
+	for i := range rsList.Items {
+		item := &rsList.Items[i]
+		if !ownedBy(item.Object, deploymentUID) {
+			continue
 		}
+		revStr := nestedString(item.Object, "metadata", "annotations", "deployment.kubernetes.io/revision")
+		if revStr == "" {
+			continue
+		}
+		rev, err := strconv.ParseInt(revStr, 10, 64)
+		if err != nil {
+			continue
+		}
+		history = append(history, rsRevision{revision: rev, obj: item})
 	}
 
-	if targetRS == nil {
-		return errorResult(fmt.Errorf("no suitable revision found for rollback")), nil
+	if len(history) == 0 {
+		return errorResult(fmt.Errorf("no rollout history found for deployment %s/%s", namespace, name)), nil
 	}
 
-	// Get the pod template from the target ReplicaSet
-	template, _, _ := unstructured.NestedMap(targetRS.Object, "spec", "template")
+	// Sort newest first.
+	sort.Slice(history, func(i, j int) bool { return history[i].revision > history[j].revision })
 
-	// Patch the deployment with the template from the target RS
+	target, err := pickTargetRevision(history, currentRevision, toRevision, func(r rsRevision) int64 { return r.revision })
+	if err != nil {
+		return errorResult(err), nil
+	}
+
+	template, found, _ := unstructured.NestedMap(target.obj.Object, "spec", "template")
+	if !found {
+		return errorResult(fmt.Errorf("target revision %d for deployment %s/%s has no spec.template", target.revision, namespace, name)), nil
+	}
+
 	patch := map[string]any{
 		"spec": map[string]any{
 			"template": template,
 		},
 	}
+	patchBytes, _ := json.Marshal(patch)
 
-	patchBytes, err := json.Marshal(patch)
+	if _, err := client.DynamicClient.Resource(gvr).Namespace(namespace).Patch(
+		ctx, name, types.StrategicMergePatchType, patchBytes, metav1.PatchOptions{}); err != nil {
+		return errorResult(err), nil
+	}
+
+	return successResult(fmt.Sprintf("Successfully rolled back deployment %s/%s to revision %d", namespace, name, target.revision)), nil
+}
+
+// undoControllerRevisionRollout implements rollback for apps/v1 StatefulSets
+// and DaemonSets, both of which use ControllerRevision objects to keep history.
+func (m *Manager) undoControllerRevisionRollout(
+	ctx context.Context,
+	client *kubernetes.Client,
+	gvr schema.GroupVersionResource,
+	namespace, name string,
+	toRevision int64,
+) (*mcp.CallToolResult, error) {
+
+	parent, err := client.DynamicClient.Resource(gvr).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		return errorResult(err), nil
 	}
 
-	_, err = client.DynamicClient.Resource(gvr).Namespace(namespace).Patch(
-		ctx, name, types.MergePatchType, patchBytes, metav1.PatchOptions{})
+	parentUID := nestedString(parent.Object, "metadata", "uid")
+	parentGeneration, _, _ := unstructured.NestedInt64(parent.Object, "status", "currentRevision")
+	_ = parentGeneration // not used directly; we rely on the highest revision below current
+
+	// The "current" revision for SS/DS is recorded under
+	// status.currentRevision (a string of the ControllerRevision name) and
+	// status.observedGeneration. To keep things simple and provider-agnostic
+	// we treat the highest revision number present as "current".
+	crGVR := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "controllerrevisions"}
+	crList, err := client.DynamicClient.Resource(crGVR).Namespace(namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return errorResult(err), nil
 	}
 
-	return successResult(fmt.Sprintf("Successfully rolled back %s/%s", gvr.Resource, name)), nil
+	type crRevision struct {
+		revision int64
+		obj      *unstructured.Unstructured
+	}
+
+	var history []crRevision
+	for i := range crList.Items {
+		item := &crList.Items[i]
+		if !ownedBy(item.Object, parentUID) {
+			continue
+		}
+		rev, _, err := unstructured.NestedInt64(item.Object, "revision")
+		if err != nil || rev == 0 {
+			continue
+		}
+		history = append(history, crRevision{revision: rev, obj: item})
+	}
+
+	if len(history) == 0 {
+		return errorResult(fmt.Errorf("no rollout history found for %s %s/%s", gvr.Resource, namespace, name)), nil
+	}
+
+	sort.Slice(history, func(i, j int) bool { return history[i].revision > history[j].revision })
+	currentRevision := history[0].revision
+
+	target, err := pickTargetRevision(history, currentRevision, toRevision, func(r crRevision) int64 { return r.revision })
+	if err != nil {
+		return errorResult(err), nil
+	}
+
+	// ControllerRevision stores the patch / serialized spec under data.raw.
+	// The patch is a strategic-merge patch fragment that applied on top of the
+	// (empty/initial) parent spec yields the historical pod template.
+	rawData, found, err := unstructured.NestedFieldCopy(target.obj.Object, "data")
+	if err != nil || !found {
+		return errorResult(fmt.Errorf("target revision %d for %s %s/%s has no data field", target.revision, gvr.Resource, namespace, name)), nil
+	}
+
+	patchBytes, err := json.Marshal(rawData)
+	if err != nil {
+		return errorResult(err), nil
+	}
+
+	if _, err := client.DynamicClient.Resource(gvr).Namespace(namespace).Patch(
+		ctx, name, types.StrategicMergePatchType, patchBytes, metav1.PatchOptions{}); err != nil {
+		return errorResult(err), nil
+	}
+
+	return successResult(fmt.Sprintf("Successfully rolled back %s %s/%s to revision %d", gvr.Resource, namespace, name, target.revision)), nil
+}
+
+// pickTargetRevision chooses the revision to roll back to.
+// 'history' must already be sorted by revision DESCENDING.
+//
+//   - When 'toRevision' > 0: that exact revision must exist and must NOT be the
+//     current one.
+//   - When 'toRevision' == 0: pick the highest revision strictly lower than
+//     'currentRevision' (kubectl semantics — N-1, not the latest in the list).
+func pickTargetRevision[T any](history []T, currentRevision, toRevision int64, revOf func(T) int64) (T, error) {
+	var zero T
+
+	if toRevision > 0 {
+		if toRevision == currentRevision {
+			return zero, fmt.Errorf("revision %d is already the current one; nothing to do", toRevision)
+		}
+		for _, h := range history {
+			if revOf(h) == toRevision {
+				return h, nil
+			}
+		}
+		return zero, fmt.Errorf("revision %d not found in rollout history", toRevision)
+	}
+
+	// Default: previous (N-1).
+	for _, h := range history {
+		if revOf(h) < currentRevision {
+			return h, nil
+		}
+	}
+	return zero, fmt.Errorf("no previous revision available to roll back to")
+}
+
+// ownedBy reports whether obj has an ownerReference with the given UID.
+func ownedBy(obj map[string]any, ownerUID string) bool {
+	if ownerUID == "" {
+		return false
+	}
+	refs, _, _ := unstructured.NestedSlice(obj, "metadata", "ownerReferences")
+	for _, r := range refs {
+		ref, ok := r.(map[string]any)
+		if !ok {
+			continue
+		}
+		if uid, _ := ref["uid"].(string); uid == ownerUID {
+			return true
+		}
+	}
+	return false
+}
+
+// nestedString is a small typed wrapper around unstructured.NestedString that
+// returns "" instead of an error/unset, to keep call sites readable.
+func nestedString(obj map[string]any, fields ...string) string {
+	v, _, _ := unstructured.NestedString(obj, fields...)
+	return v
 }
 
 // Helper to extract nested values
-func unstructured_NestedMap(obj map[string]any, fields ...string) (map[string]any, bool, error) {
-	return unstructured.NestedMap(obj, fields...)
-}

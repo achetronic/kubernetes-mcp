@@ -28,11 +28,19 @@ import (
 
 func (m *Manager) registerListAPIResources() {
 	tool := mcp.NewTool(m.toolName("list_api_resources"),
-		mcp.WithDescription("Lists available API resources in the cluster"),
-		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
-		mcp.WithString("api_group", mcp.Description("Filter by API group")),
-		mcp.WithBoolean("namespaced", mcp.Description("Filter by namespaced resources (true/false)")),
-		mcp.WithArray("yq_expressions", mcp.Description("Array of yq expressions (https://mikefarah.gitbook.io/yq) to filter/transform the YAML output. Applied sequentially. Examples: '.[] | select(.namespaced == true)' (filter namespaced resources), '.[].kind' (get all kinds), 'map(select(.group == \"apps\"))' (filter by group)")),
+		mcp.WithDescription(`List the API resources actually served by the cluster, including CRDs.
+
+Use this to discover the exact 'group' / 'version' / 'resource' tuple to
+pass to other tools (get_resource, list_resources, ...). Returns one entry
+per (Kind, Version) pair with its plural name, group, version, namespaced
+flag and supported verbs.
+
+If 'list_resources' fails with "the server could not find the requested
+resource", run this tool first to confirm the GVR exists.`),
+		mcp.WithString("context", mcp.Description("Kubernetes context to target. If empty, uses the currently active MCP context.")),
+		mcp.WithString("api_group", mcp.Description("Restrict the listing to a single API group. Empty string \"\" matches the core API. Examples: 'apps', 'networking.k8s.io', 'storage.k8s.io'. Omit to list every group.")),
+		mcp.WithBoolean("namespaced", mcp.Description("If set, return only namespaced (true) or only cluster-scoped (false) resources. Omit for no filtering.")),
+		mcp.WithArray("yq_expressions", mcp.Description("Optional yq expressions applied to the YAML output (a top-level array, NOT a List object — use '.[]'). Examples: '.[].name' (all plural names), '.[] | select(.namespaced == true) | .name' (namespaced names), 'map(select(.group == \"apps\"))' (apps group only).")),
 	)
 	m.mcpServer.AddTool(tool, m.handleListAPIResources)
 }
@@ -129,9 +137,13 @@ func (m *Manager) handleListAPIResources(ctx context.Context, request mcp.CallTo
 
 func (m *Manager) registerListAPIVersions() {
 	tool := mcp.NewTool(m.toolName("list_api_versions"),
-		mcp.WithDescription("Lists available API versions"),
-		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
-		mcp.WithArray("yq_expressions", mcp.Description("Array of yq expressions (https://mikefarah.gitbook.io/yq) to filter/transform the YAML output. Applied sequentially. Examples: '.groups[].name' (get group names), '.groups[] | select(.name == \"apps\")' (filter specific group)")),
+		mcp.WithDescription(`List the API groups served by the cluster and the versions available
+within each group, including which version is the preferred one.
+
+Use this when you don't know whether a CRD ships 'v1', 'v1beta1', or both.
+For the actual resources within a group prefer 'list_api_resources'.`),
+		mcp.WithString("context", mcp.Description("Kubernetes context to target. If empty, uses the currently active MCP context.")),
+		mcp.WithArray("yq_expressions", mcp.Description("Optional yq expressions applied to the APIGroupList YAML. Examples: '.groups[].name' (group names), '.groups[] | select(.name == \"apps\") | .preferredVersion.version' (preferred version of apps).")),
 	)
 	m.mcpServer.AddTool(tool, m.handleListAPIVersions)
 }
@@ -175,8 +187,13 @@ func (m *Manager) handleListAPIVersions(ctx context.Context, request mcp.CallToo
 
 func (m *Manager) registerGetClusterInfo() {
 	tool := mcp.NewTool(m.toolName("get_cluster_info"),
-		mcp.WithDescription("Gets basic cluster information"),
-		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
+		mcp.WithDescription(`Return a small summary of the targeted cluster: server version, API host,
+node count, namespace count, and the human description configured for the
+MCP context.
+
+Useful as a smoke test before running anything destructive, and to confirm
+which physical cluster a context points at.`),
+		mcp.WithString("context", mcp.Description("Kubernetes context to target. If empty, uses the currently active MCP context.")),
 	)
 	m.mcpServer.AddTool(tool, m.handleGetClusterInfo)
 }
@@ -242,10 +259,18 @@ func (m *Manager) handleGetClusterInfo(ctx context.Context, request mcp.CallTool
 
 func (m *Manager) registerListNamespaces() {
 	tool := mcp.NewTool(m.toolName("list_namespaces"),
-		mcp.WithDescription("Lists namespaces"),
-		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
-		mcp.WithString("label_selector", mcp.Description("Label selector")),
-		mcp.WithArray("yq_expressions", mcp.Description("Array of yq expressions (https://mikefarah.gitbook.io/yq) to filter/transform the YAML output. Applied sequentially. Examples: '.[].name' (get all namespace names), '.[] | select(.status == \"Active\")' (filter active namespaces), '.[] | select(.allowed == true)' (filter allowed namespaces)")),
+		mcp.WithDescription(`List the namespaces in the cluster, with phase, age, and whether the
+MCP authorization layer allows operating on each one.
+
+The 'allowed' field reflects this MCP server's namespace allow/deny lists
+for the current context, NOT Kubernetes RBAC. A namespace can be 'allowed:
+true' here and still reject your call due to RBAC.
+
+For full Namespace objects (labels, annotations, ...) use 'list_resources'
+with resource='namespaces'.`),
+		mcp.WithString("context", mcp.Description("Kubernetes context to target. If empty, uses the currently active MCP context.")),
+		mcp.WithString("label_selector", mcp.Description("Kubernetes label selector. Examples: 'team=backend', 'env in (dev,staging)'.")),
+		mcp.WithArray("yq_expressions", mcp.Description("Optional yq expressions applied to the YAML array (use '.[]' to iterate). Examples: '.[].name' (just names), '.[] | select(.status == \"Active\") | .name' (only active), '.[] | select(.allowed == true) | .name' (only allowed by MCP authz).")),
 	)
 	m.mcpServer.AddTool(tool, m.handleListNamespaces)
 }

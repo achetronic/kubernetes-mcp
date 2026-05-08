@@ -35,15 +35,22 @@ import (
 
 func (m *Manager) registerGetLogs() {
 	tool := mcp.NewTool(m.toolName("get_logs"),
-		mcp.WithDescription("Gets logs from a Pod"),
-		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
-		mcp.WithString("name", mcp.Required(), mcp.Description("Pod name")),
-		mcp.WithString("namespace", mcp.Description("Namespace")),
-		mcp.WithString("container", mcp.Description("Container name (required if pod has multiple containers)")),
-		mcp.WithBoolean("previous", mcp.Description("Get logs from the previous container instance")),
-		mcp.WithNumber("since_seconds", mcp.Description("Only return logs newer than this many seconds")),
-		mcp.WithNumber("tail_lines", mcp.Description("Number of lines from the end of the logs to show")),
-		mcp.WithBoolean("timestamps", mcp.Description("Include timestamps in the log output")),
+		mcp.WithDescription(`Retrieve container logs from a Pod.
+
+Always combine 'tail_lines' or 'since_seconds' with this tool unless you are
+sure the log volume is small. A chatty container can return megabytes per
+second, which the model is not the right place to handle.
+
+For multi-container Pods you must set 'container'. To inspect logs from a
+crashed container that has been restarted, set 'previous: true'.`),
+		mcp.WithString("context", mcp.Description("Kubernetes context to target. If empty, uses the currently active MCP context.")),
+		mcp.WithString("name", mcp.Required(), mcp.Description("Name of the Pod whose logs to fetch.")),
+		mcp.WithString("namespace", mcp.Description("Namespace where the Pod lives. Defaults to 'default' if empty.")),
+		mcp.WithString("container", mcp.Description("Name of the container inside the Pod. Required when the Pod has more than one container; ignored otherwise.")),
+		mcp.WithBoolean("previous", mcp.Description("If true, return logs from the previous instance of the container (i.e. before the last restart). Useful to investigate crash loops. Fails if the container has never restarted.")),
+		mcp.WithNumber("since_seconds", mcp.Description("Only return logs newer than this many seconds. Integer >= 1. Omit or 0 to disable.")),
+		mcp.WithNumber("tail_lines", mcp.Description("Return only the last N lines. Integer >= 1. Omit or 0 to return all logs (potentially huge).")),
+		mcp.WithBoolean("timestamps", mcp.Description("If true, prepend an RFC3339 timestamp to each line. Default false.")),
 	)
 	m.mcpServer.AddTool(tool, m.handleGetLogs)
 }
@@ -116,12 +123,23 @@ func (m *Manager) handleGetLogs(ctx context.Context, request mcp.CallToolRequest
 
 func (m *Manager) registerExecCommand() {
 	tool := mcp.NewTool(m.toolName("exec_command"),
-		mcp.WithDescription("Executes a command in a container (non-interactive)"),
-		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
-		mcp.WithString("name", mcp.Required(), mcp.Description("Pod name")),
-		mcp.WithString("namespace", mcp.Description("Namespace")),
-		mcp.WithString("container", mcp.Description("Container name")),
-		mcp.WithArray("command", mcp.Required(), mcp.Description("Command to execute as array of strings")),
+		mcp.WithDescription(`Run a one-shot, non-interactive command inside a running container and
+return its stdout and stderr.
+
+Constraints:
+  - Non-interactive (no TTY, no stdin). Anything that requires user input
+    or paging will block until timeout.
+  - Hard timeout of 30 seconds per call. Use long-running diagnostics in
+    smaller, scoped commands.
+  - The container must already exist (Pod in Running phase).
+
+Typical uses: 'cat /etc/config.yaml', 'env', 'ps aux', 'ls /var/log'.
+Avoid 'top', 'tail -f', 'sh' and similar interactive sessions.`),
+		mcp.WithString("context", mcp.Description("Kubernetes context to target. If empty, uses the currently active MCP context.")),
+		mcp.WithString("name", mcp.Required(), mcp.Description("Name of the Pod to exec into.")),
+		mcp.WithString("namespace", mcp.Description("Namespace where the Pod lives. Defaults to 'default' if empty.")),
+		mcp.WithString("container", mcp.Description("Name of the container inside the Pod. Required when the Pod has more than one container.")),
+		mcp.WithArray("command", mcp.Required(), mcp.Description("Command and arguments as an array of strings. Example: [\"ls\", \"-la\", \"/var/log\"]. Use shell features by wrapping in 'sh -c': [\"sh\", \"-c\", \"echo $HOSTNAME && date\"].")),
 	)
 	m.mcpServer.AddTool(tool, m.handleExecCommand)
 }
@@ -213,12 +231,19 @@ func (m *Manager) handleExecCommand(ctx context.Context, request mcp.CallToolReq
 
 func (m *Manager) registerListEvents() {
 	tool := mcp.NewTool(m.toolName("list_events"),
-		mcp.WithDescription("Lists cluster or namespace events"),
-		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
-		mcp.WithString("namespace", mcp.Description("Namespace (empty for all namespaces)")),
-		mcp.WithString("field_selector", mcp.Description("Field selector (e.g., 'involvedObject.name=my-pod')")),
-		mcp.WithArray("types", mcp.Description("Event types to filter: 'Normal', 'Warning'")),
-		mcp.WithArray("yq_expressions", mcp.Description("Array of yq expressions (https://mikefarah.gitbook.io/yq) to filter/transform the YAML output. Applied sequentially. Examples: '.items[] | select(.type == \"Warning\")' (filter warnings), '.items[].message' (get all messages), '.items[] | {name: .involvedObject.name, reason: .reason}' (reshape)")),
+		mcp.WithDescription(`List Kubernetes events from a namespace or the whole cluster.
+
+Best when investigating recent failures: scheduling, pulling images, OOM
+kills, probe failures, etc. Events are time-bounded (the API server prunes
+them after a few hours by default), so don't rely on them for audit.
+
+Combine 'field_selector' and 'types' to narrow the noise. Use 'yq_expressions'
+to project just the fields you care about ('reason', 'message', 'involvedObject').`),
+		mcp.WithString("context", mcp.Description("Kubernetes context to target. If empty, uses the currently active MCP context.")),
+		mcp.WithString("namespace", mcp.Description("Namespace to scope the listing to. Empty lists across ALL namespaces (subject to RBAC).")),
+		mcp.WithString("field_selector", mcp.Description("Field selector. Common keys: 'involvedObject.name', 'involvedObject.kind', 'involvedObject.namespace', 'reason', 'type'. Example: 'involvedObject.name=my-pod,type=Warning'.")),
+		mcp.WithArray("types", mcp.Description("Filter by event type. Accepts an array containing any of: 'Normal', 'Warning'. Empty or omitted means no type filter.")),
+		mcp.WithArray("yq_expressions", mcp.Description("Optional yq expressions applied to the events list. The output is an EventList so use '.items[]' to iterate. Examples: '.items[] | select(.type == \"Warning\") | .message' (all warning messages), '.items[] | {when: .lastTimestamp, reason: .reason, msg: .message}' (compact view).")),
 	)
 	m.mcpServer.AddTool(tool, m.handleListEvents)
 }

@@ -31,10 +31,19 @@ import (
 
 func (m *Manager) registerDiffManifest() {
 	tool := mcp.NewTool(m.toolName("diff_manifest"),
-		mcp.WithDescription("Compares a manifest with the current cluster state"),
-		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
-		mcp.WithString("manifest", mcp.Required(), mcp.Description("YAML or JSON manifest to compare")),
-		mcp.WithString("namespace", mcp.Description("Namespace override (optional)")),
+		mcp.WithDescription(`Preview the changes that 'apply_manifest' would make, WITHOUT applying them.
+
+Compares the desired manifest against the current cluster state and reports
+field-level additions / removals / modifications. Skips auto-managed fields
+('resourceVersion', 'uid', 'creationTimestamp', 'managedFields', 'status').
+
+If the resource does not yet exist, the tool reports that it would be CREATED.
+
+The resource type is resolved from the manifest's 'apiVersion' / 'kind' via
+the cluster's RESTMapper, so CRDs and irregular plurals work transparently.`),
+		mcp.WithString("context", mcp.Description("Kubernetes context to target. If empty, uses the currently active MCP context.")),
+		mcp.WithString("manifest", mcp.Required(), mcp.Description("A single Kubernetes manifest in YAML or JSON. Multi-document YAML is NOT supported.")),
+		mcp.WithString("namespace", mcp.Description("Namespace override. If set, takes precedence over 'metadata.namespace' from the manifest. Ignored for cluster-scoped kinds.")),
 	)
 	m.mcpServer.AddTool(tool, m.handleDiffManifest)
 }

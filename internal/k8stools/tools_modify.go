@@ -33,10 +33,24 @@ import (
 
 func (m *Manager) registerApplyManifest() {
 	tool := mcp.NewTool(m.toolName("apply_manifest"),
-		mcp.WithDescription("Applies a YAML/JSON manifest (create or update)"),
-		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
-		mcp.WithString("manifest", mcp.Required(), mcp.Description("YAML or JSON manifest to apply")),
-		mcp.WithString("namespace", mcp.Description("Namespace override (optional)")),
+		mcp.WithDescription(`Create-or-update (upsert) a Kubernetes resource from a YAML or JSON manifest.
+
+Behaviour: tries to Create the resource; if it already exists, falls back
+to Update. The resource type is detected automatically from the manifest's
+'apiVersion' / 'kind', resolved against the cluster's discovery API via the
+RESTMapper, so CRDs and irregular plurals (StorageClass, NetworkPolicy, ...)
+work transparently.
+
+Limitations:
+  - Single-document manifests only. Multi-document YAML separated by '---'
+    is NOT supported; pass each document in a separate call.
+  - This is a 'replace'-style update, not server-side strategic merge.
+    For surgical changes prefer 'patch_resource'.
+
+Use 'diff_manifest' first if you want to preview the change without applying it.`),
+		mcp.WithString("context", mcp.Description("Kubernetes context to target. If empty, uses the currently active MCP context.")),
+		mcp.WithString("manifest", mcp.Required(), mcp.Description("A single Kubernetes manifest in YAML or JSON. Must include 'apiVersion', 'kind' and 'metadata.name'. For namespaced kinds either set 'metadata.namespace' here or pass the 'namespace' argument.")),
+		mcp.WithString("namespace", mcp.Description("Namespace override. If set, takes precedence over 'metadata.namespace' from the manifest. Ignored for cluster-scoped kinds.")),
 	)
 	m.mcpServer.AddTool(tool, m.handleApplyManifest)
 }
@@ -118,15 +132,27 @@ func (m *Manager) handleApplyManifest(ctx context.Context, request mcp.CallToolR
 
 func (m *Manager) registerPatchResource() {
 	tool := mcp.NewTool(m.toolName("patch_resource"),
-		mcp.WithDescription("Patches an existing Kubernetes resource"),
-		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
-		mcp.WithString("group", mcp.Description("API group")),
-		mcp.WithString("version", mcp.Required(), mcp.Description("API version")),
-		mcp.WithString("resource", mcp.Required(), mcp.Description("Resource name in the API sense, lowercase plural (e.g., 'pods', 'deployments'). NOT the Kind.")),
-		mcp.WithString("name", mcp.Required(), mcp.Description("Resource instance name")),
-		mcp.WithString("namespace", mcp.Description("Namespace")),
-		mcp.WithString("patch_type", mcp.Required(), mcp.Description("Patch type: 'strategic', 'merge', or 'json'")),
-		mcp.WithString("patch", mcp.Required(), mcp.Description("Patch content (YAML or JSON)")),
+		mcp.WithDescription(`Apply a partial change to an existing Kubernetes resource.
+
+Prefer this over 'apply_manifest' when you only want to change a few fields
+(image tag, replica count not via scale, annotation, ...).
+
+Choose 'patch_type' carefully:
+  - 'strategic': Strategic Merge Patch. Works only on built-in Kubernetes
+    types and understands list-merge semantics (e.g. patching a single
+    container by name). The default for most kubectl operations.
+  - 'merge': RFC 7396 JSON Merge Patch. Works on any resource including
+    CRDs. Replaces lists entirely (does not merge them by key).
+  - 'json': RFC 6902 JSON Patch. An array of operations like
+    [{"op":"replace","path":"/spec/replicas","value":3}]. Most precise.`),
+		mcp.WithString("context", mcp.Description("Kubernetes context to target. If empty, uses the currently active MCP context.")),
+		mcp.WithString("group", mcp.Description("API group. Empty string \"\" for the core API.")),
+		mcp.WithString("version", mcp.Required(), mcp.Description("API version, e.g. 'v1'.")),
+		mcp.WithString("resource", mcp.Required(), mcp.Description("Resource name in the API sense: lowercase plural ('pods', 'deployments'). NOT the Kind.")),
+		mcp.WithString("name", mcp.Required(), mcp.Description("Name of the resource instance to patch.")),
+		mcp.WithString("namespace", mcp.Description("Namespace where the resource lives. Required for namespaced resources.")),
+		mcp.WithString("patch_type", mcp.Required(), mcp.Description("'strategic' for Strategic Merge Patch (built-in types only), 'merge' for RFC 7396 JSON Merge Patch (works on CRDs), or 'json' for RFC 6902 JSON Patch operations.")),
+		mcp.WithString("patch", mcp.Required(), mcp.Description("Patch payload. YAML and JSON are both accepted. For 'json' patch_type the payload must be a JSON array of operations.")),
 	)
 	m.mcpServer.AddTool(tool, m.handlePatchResource)
 }
@@ -212,15 +238,21 @@ func (m *Manager) handlePatchResource(ctx context.Context, request mcp.CallToolR
 
 func (m *Manager) registerDeleteResource() {
 	tool := mcp.NewTool(m.toolName("delete_resource"),
-		mcp.WithDescription("Deletes a Kubernetes resource"),
-		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
-		mcp.WithString("group", mcp.Description("API group")),
-		mcp.WithString("version", mcp.Required(), mcp.Description("API version")),
-		mcp.WithString("resource", mcp.Required(), mcp.Description("Resource name in the API sense, lowercase plural (e.g., 'pods', 'deployments'). NOT the Kind.")),
-		mcp.WithString("name", mcp.Required(), mcp.Description("Resource instance name")),
-		mcp.WithString("namespace", mcp.Description("Namespace")),
-		mcp.WithNumber("grace_period_seconds", mcp.Description("Grace period in seconds")),
-		mcp.WithString("propagation_policy", mcp.Description("Deletion propagation policy: 'Orphan', 'Background', 'Foreground'")),
+		mcp.WithDescription(`Delete ONE Kubernetes resource by name.
+
+DESTRUCTIVE. Cannot be undone (the API server has no trash bin).
+Verify with 'get_resource' first if you have any doubt.
+
+For deleting many objects at once with a selector use 'delete_resources'
+instead — but be even more careful.`),
+		mcp.WithString("context", mcp.Description("Kubernetes context to target. If empty, uses the currently active MCP context.")),
+		mcp.WithString("group", mcp.Description("API group. Empty string \"\" for the core API.")),
+		mcp.WithString("version", mcp.Required(), mcp.Description("API version, e.g. 'v1'.")),
+		mcp.WithString("resource", mcp.Required(), mcp.Description("Resource name in the API sense: lowercase plural ('pods', 'deployments'). NOT the Kind.")),
+		mcp.WithString("name", mcp.Required(), mcp.Description("Name of the resource instance to delete.")),
+		mcp.WithString("namespace", mcp.Description("Namespace where the resource lives. Required for namespaced resources.")),
+		mcp.WithNumber("grace_period_seconds", mcp.Description("Seconds before forced termination. 0 = delete immediately (forceful, may leak resources). Omit to use the resource's default (30s for Pods).")),
+		mcp.WithString("propagation_policy", mcp.Description("How to handle dependents. 'Background' (default for most kinds): API returns immediately, dependents deleted asynchronously. 'Foreground': blocks until dependents are gone. 'Orphan': leaves dependents alive (e.g. delete a Deployment but keep its Pods).")),
 	)
 	m.mcpServer.AddTool(tool, m.handleDeleteResource)
 }
@@ -272,15 +304,22 @@ func (m *Manager) handleDeleteResource(ctx context.Context, request mcp.CallTool
 
 func (m *Manager) registerDeleteResources() {
 	tool := mcp.NewTool(m.toolName("delete_resources"),
-		mcp.WithDescription("Deletes multiple Kubernetes resources matching selectors"),
-		mcp.WithString("context", mcp.Description("Kubernetes context to use")),
-		mcp.WithString("group", mcp.Description("API group")),
-		mcp.WithString("version", mcp.Required(), mcp.Description("API version")),
-		mcp.WithString("resource", mcp.Required(), mcp.Description("Resource name in the API sense, lowercase plural (e.g., 'pods', 'deployments'). NOT the Kind.")),
-		mcp.WithString("namespace", mcp.Description("Namespace")),
-		mcp.WithString("label_selector", mcp.Description("Label selector")),
-		mcp.WithString("field_selector", mcp.Description("Field selector")),
-		mcp.WithNumber("grace_period_seconds", mcp.Description("Grace period in seconds")),
+		mcp.WithDescription(`Delete MANY resources at once matching a label and/or field selector.
+
+VERY DESTRUCTIVE. Always run 'list_resources' with the same selector first
+to confirm exactly which objects will be deleted. At least one selector
+('label_selector' or 'field_selector') is REQUIRED to avoid accidentally
+wiping a whole namespace.
+
+For a single named resource use 'delete_resource'.`),
+		mcp.WithString("context", mcp.Description("Kubernetes context to target. If empty, uses the currently active MCP context.")),
+		mcp.WithString("group", mcp.Description("API group. Empty string \"\" for the core API.")),
+		mcp.WithString("version", mcp.Required(), mcp.Description("API version, e.g. 'v1'.")),
+		mcp.WithString("resource", mcp.Required(), mcp.Description("Resource name in the API sense: lowercase plural ('pods', 'deployments'). NOT the Kind.")),
+		mcp.WithString("namespace", mcp.Description("Namespace to scope the deletion to. Empty deletes across ALL namespaces — extremely dangerous, double-check before doing this.")),
+		mcp.WithString("label_selector", mcp.Description("Kubernetes label selector. Examples: 'app=nginx', 'temp=true', 'tier in (frontend,backend)'. Required if 'field_selector' is empty.")),
+		mcp.WithString("field_selector", mcp.Description("Kubernetes field selector. Example: 'status.phase=Failed'. Required if 'label_selector' is empty.")),
+		mcp.WithNumber("grace_period_seconds", mcp.Description("Seconds before forced termination. 0 = delete immediately. Omit to use the resource's default.")),
 	)
 	m.mcpServer.AddTool(tool, m.handleDeleteResources)
 }

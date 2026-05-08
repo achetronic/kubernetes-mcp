@@ -27,7 +27,12 @@ import (
 
 func (m *Manager) registerGetCurrentContext() {
 	tool := mcp.NewTool(m.toolName("get_current_context"),
-		mcp.WithDescription("Gets the current Kubernetes context"),
+		mcp.WithDescription(`Return the name and human description of the MCP context currently
+selected as default.
+
+This is the context used by every other tool when its 'context' parameter
+is empty. To change it use 'switch_context'. To see all available contexts
+use 'list_contexts'.`),
 	)
 	m.mcpServer.AddTool(tool, m.handleGetCurrentContext)
 }
@@ -59,8 +64,13 @@ func (m *Manager) handleGetCurrentContext(ctx context.Context, request mcp.CallT
 
 func (m *Manager) registerListContexts() {
 	tool := mcp.NewTool(m.toolName("list_contexts"),
-		mcp.WithDescription("Lists available Kubernetes contexts"),
-		mcp.WithArray("yq_expressions", mcp.Description("Array of yq expressions (https://mikefarah.gitbook.io/yq) to filter/transform the YAML output. Applied sequentially. Examples: '.[].name' (get context names), '.[] | select(.current == true)' (get current context)")),
+		mcp.WithDescription(`List the MCP contexts (Kubernetes clusters) configured on this server.
+
+Each entry includes the context name, its human description from the server
+configuration, and whether it is the currently active default. Use this to
+pick a value for the 'context' parameter of other tools, or for
+'switch_context'.`),
+		mcp.WithArray("yq_expressions", mcp.Description("Optional yq expressions applied to the YAML array (use '.[]' to iterate). Examples: '.[].name' (just names), '.[] | select(.current == true) | .name' (the active one).")),
 	)
 	m.mcpServer.AddTool(tool, m.handleListContexts)
 }
@@ -111,8 +121,13 @@ func (m *Manager) handleListContexts(ctx context.Context, request mcp.CallToolRe
 
 func (m *Manager) registerSwitchContext() {
 	tool := mcp.NewTool(m.toolName("switch_context"),
-		mcp.WithDescription("Switches the active Kubernetes context"),
-		mcp.WithString("context_name", mcp.Required(), mcp.Description("Name of the context to switch to")),
+		mcp.WithDescription(`Change the MCP default context (Kubernetes cluster) used by every other
+tool when its 'context' parameter is empty.
+
+Use sparingly: prefer passing 'context' explicitly to each tool call when
+you operate against several clusters in the same session. The switch is
+process-wide and affects subsequent calls from any client.`),
+		mcp.WithString("context_name", mcp.Required(), mcp.Description("Name of the MCP context to make active. Must match one of the names returned by 'list_contexts'.")),
 	)
 	m.mcpServer.AddTool(tool, m.handleSwitchContext)
 }
