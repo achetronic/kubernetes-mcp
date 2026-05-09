@@ -252,9 +252,21 @@ docker run -d \
 
 **3. Test it:**
 
+The MCP server exposes the protocol under `/mcp` (POST, JSON-RPC) and OAuth
+discovery under `/.well-known/oauth-*` when those are enabled. There is no
+plain `/health` endpoint; verify the server is up by issuing the MCP
+`initialize` handshake:
+
 ```bash
-curl http://localhost:8080/health
+curl -s -X POST http://localhost:8080/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}'
 ```
+
+A `200` response with a `serverInfo` block means the server is up and
+talking MCP. The response also includes an `Mcp-Session-Id` header that
+clients propagate on subsequent requests.
 
 ---
 
@@ -274,6 +286,54 @@ helm install kubernetes-mcp bjw-s/app-template --version 4.2.0 \
 ```
 
 Edit `values.yaml` to configure your environment. See [chart/values.yaml](./chart/values.yaml) for all options.
+
+#### In-cluster credentials and RBAC
+
+When running inside the cluster, leave `kubeconfig: ""` in your config and
+the server will fall through to the Pod's ServiceAccount token
+(`/var/run/secrets/kubernetes.io/serviceaccount`). The chart values do
+**not** ship a default ClusterRoleBinding — you decide what the server is
+allowed to do at the Kubernetes RBAC level. A minimal "let it do
+everything" example to drop into your manifests:
+
+```yaml
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kubernetes-mcp
+  namespace: kubernetes-mcp
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubernetes-mcp
+rules:
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["*"]
+  - nonResourceURLs: ["*"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kubernetes-mcp
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kubernetes-mcp
+subjects:
+  - kind: ServiceAccount
+    name: kubernetes-mcp
+    namespace: kubernetes-mcp
+```
+
+This is the equivalent of `cluster-admin` for the ServiceAccount. Restrict
+the rules block before exposing the server outside trusted networks. The
+MCP authorization layer (CEL policies) is independent from the cluster's
+RBAC and is checked first; both layers must allow a call for it to reach
+the API server.
 
 ---
 
@@ -353,9 +413,10 @@ kubernetes:
   # Auto-load kubeconfigs from directory (context name = current-context of each file)
   # contexts_dir: "/etc/kubernetes/clusters/"
 
-  # API discovery cache. Used by the RESTMapper to resolve Kind -> Resource for
-  # apply_manifest / diff_manifest, and to detect newly installed CRDs.
-  # The cache is invalidated periodically with this interval. Default: 10m.
+  # API discovery cache. The RESTMapper uses it to translate Kind <-> Resource
+  # for 'apply_manifest' / 'diff_manifest', to resolve the Kind in
+  # 'describe_resource' (used to filter related events) and to surface newly
+  # installed CRDs. The cache is invalidated on this interval. Default: 10m.
   discovery:
     refresh_interval: "10m"
 
@@ -401,13 +462,14 @@ authorization:
 
 ### Environment Variables
 
-All config values support environment variable expansion:
+All config values support environment variable expansion at load time
+(`$VAR` or `${VAR}`):
 
 ```yaml
 kubernetes:
   contexts:
-    production:
-      kubeconfig: "$PROD_KUBECONFIG" # Expanded at runtime
+    - name: "production"
+      kubeconfig: "$PROD_KUBECONFIG"   # Expanded at runtime
 ```
 
 ### Authentication
@@ -637,7 +699,13 @@ Control access by **API group**, **resource** (plural lowercase GVR), **namespac
 
 #### Example: Safe operations (read + selective delete)
 
-A production-safe policy: read everything (except secrets), allow pod deletes only in app namespaces, deny exec/apply/patch entirely.
+A production-safe policy. The allow rules cover read, diff, scale, rollout
+and pod logs. `delete_resource` is permitted only for pods in the
+`aplicacion-*` namespaces (and `default`). Anything not listed in any allow
+rule is denied by default — including `apply_manifest`, `patch_resource`
+and `delete_resources`. The deny rules narrow the allows further: reading
+secrets, service accounts and the various secret-management CRDs is
+forbidden, and `exec_command` is blocked outright.
 
 ```yaml
 - name: "safe-operations"
@@ -758,7 +826,8 @@ kubernetes-mcp/
 │   │   ├── tools_cluster.go       # cluster info, namespaces, api resources
 │   │   ├── tools_context.go       # context management
 │   │   ├── tools_rbac_metrics.go  # permissions, metrics
-│   │   └── tools_diff.go          # manifest diff
+│   │   ├── tools_diff.go          # manifest diff
+│   │   └── e2e_*_test.go          # End-to-end tests (build tag 'e2e')
 │   ├── kubernetes/client.go       # Multi-cluster client manager
 │   ├── authorization/evaluator.go # RBAC evaluator
 │   ├── yqutil/evaluator.go        # yq expression processor
@@ -767,7 +836,9 @@ kubernetes-mcp/
 ├── docs/
 │   ├── config-http.yaml           # HTTP mode example
 │   └── config-stdio.yaml          # Stdio mode example
-└── chart/                         # Helm chart
+├── chart/                         # Helm values for bjw-s/app-template
+├── .agents/                       # Internal architecture & design docs
+└── .github/workflows/             # CI: release-binaries, release-docker-images, e2e-tests
 ```
 
 ### Adding a New Tool

@@ -253,3 +253,16 @@ Particular attention to:
 - Argo Rollouts undo (already deferred earlier).
 - `get_pod_metrics` / `get_node_metrics` against `metrics.k8s.io` v1 vs v1beta1
   (we currently target v1beta1 hardcoded).
+- **bjw-s/app-template chart 4.x → 5.x migration.** Pinned to 4.2.0 in the
+  README and `chart/values.yaml`. The 5.0.0 release introduces breaking
+  changes to several blocks we use:
+  - `rawResources.<name>`: manifest body moves under a `manifest:` key,
+    `labels`/`annotations` move under `metadata:`.
+  - `defaultPodOptions.automountServiceAccountToken` now defaults to
+    `false`. Need to set it to `true` (or rely on the auto-created
+    ServiceAccount and explicitly opt in) for the in-cluster auth path
+    to keep working.
+  - A default ServiceAccount is created automatically; revisit alongside
+    the in-cluster RBAC docs in the README.
+  Migration is straightforward but requires touching every entry under
+  `rawResources` in `chart/values.yaml` and the `defaultPodOptions` block.
