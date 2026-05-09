@@ -19,11 +19,11 @@ package k8stools
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"kubernetes-mcp/internal/authorization"
 
 	"github.com/mark3labs/mcp-go/mcp"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/yaml"
@@ -34,13 +34,22 @@ func (m *Manager) registerDiffManifest() {
 		mcp.WithDescription(`Preview the changes that 'apply_manifest' would make, WITHOUT applying them.
 
 Compares the desired manifest against the current cluster state and reports
-field-level additions / removals / modifications. Skips auto-managed fields
-('resourceVersion', 'uid', 'creationTimestamp', 'managedFields', 'status').
+field-level additions / removals / modifications. Server-managed fields that
+would otherwise show up as constant noise are stripped from BOTH sides
+before the comparison: the 'status' subtree, metadata fields
+('resourceVersion', 'uid', 'generation', 'creationTimestamp',
+'managedFields', 'finalizers', 'ownerReferences', 'deletionTimestamp'),
+the 'kubectl.kubernetes.io/last-applied-configuration' annotation, plus
+controller-assigned immutable fields ('Service.spec.clusterIP/clusterIPs/
+ipFamilies/ipFamilyPolicy', 'PersistentVolumeClaim.spec.volumeName').
 
 If the resource does not yet exist, the tool reports that it would be CREATED.
 
 The resource type is resolved from the manifest's 'apiVersion' / 'kind' via
-the cluster's RESTMapper, so CRDs and irregular plurals work transparently.`),
+the cluster's RESTMapper, so CRDs and irregular plurals work transparently.
+
+Single-document manifests only; multi-doc YAML separated by '---' is
+rejected with an explicit error (one call per document).`),
 		mcp.WithString("context", mcp.Description("Kubernetes context to target. If empty, uses the currently active MCP context.")),
 		mcp.WithString("manifest", mcp.Required(), mcp.Description("A single Kubernetes manifest in YAML or JSON. Multi-document YAML is NOT supported.")),
 		mcp.WithString("namespace", mcp.Description("Namespace override. If set, takes precedence over 'metadata.namespace' from the manifest. Ignored for cluster-scoped kinds.")),
@@ -55,14 +64,29 @@ func (m *Manager) handleDiffManifest(ctx context.Context, request mcp.CallToolRe
 	manifest, _ := args["manifest"].(string)
 	namespaceOverride, _ := args["namespace"].(string)
 
+	// Reject multi-document YAML explicitly. sigs.k8s.io/yaml.Unmarshal would
+	// silently keep only the first document, which masks bugs in callers.
+	if isMultiDocumentYAML(manifest) {
+		return errorResult(fmt.Errorf("multi-document YAML is not supported; submit one document per call (separators '---' detected)")), nil
+	}
+
 	// Parse manifest
 	obj := &unstructured.Unstructured{}
 	if err := yaml.Unmarshal([]byte(manifest), &obj.Object); err != nil {
 		return errorResult(fmt.Errorf("failed to parse manifest: %w", err)), nil
 	}
+	if len(obj.Object) == 0 {
+		return errorResult(fmt.Errorf("manifest is empty")), nil
+	}
 
 	gvk := obj.GroupVersionKind()
+	if gvk.Kind == "" {
+		return errorResult(fmt.Errorf("manifest is missing 'kind'")), nil
+	}
 	name := obj.GetName()
+	if name == "" {
+		return errorResult(fmt.Errorf("manifest is missing 'metadata.name'")), nil
+	}
 
 	client, err := m.clientManager.GetClient(k8sContext)
 	if err != nil {
@@ -106,7 +130,7 @@ func (m *Manager) handleDiffManifest(ctx context.Context, request mcp.CallToolRe
 	}
 
 	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
+		if apierrors.IsNotFound(err) {
 			return successResult(fmt.Sprintf("Resource %s/%s does not exist in namespace %s\nThis manifest would CREATE a new resource.", gvk.Kind, name, namespace)), nil
 		}
 		return errorResult(err), nil

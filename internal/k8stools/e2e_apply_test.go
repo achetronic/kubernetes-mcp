@@ -250,3 +250,35 @@ data:
 	out := expectOK(t, res, "diff_manifest of non-existing")
 	requireContains(t, out, "would CREATE a new resource", "expected creation hint")
 }
+
+// diff_manifest must reject multi-document YAML for symmetry with apply_manifest.
+func TestE2E_DiffManifest_RejectsMultiDoc(t *testing.T) {
+	e := newE2EEnv(t)
+
+	manifest := `
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kmcp-e2e-diff-multi-1
+  namespace: ` + e.namespace + `
+data:
+  x: "1"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kmcp-e2e-diff-multi-2
+  namespace: ` + e.namespace + `
+data:
+  y: "2"
+`
+	res, err := e.manager.handleDiffManifest(context.Background(), makeRequest(map[string]any{
+		"context":  e.context,
+		"manifest": manifest,
+	}))
+	if err != nil {
+		t.Fatalf("go-error: %v", err)
+	}
+	text := expectErr(t, res, "multi-doc YAML must be rejected by diff_manifest")
+	requireContains(t, text, "multi-document YAML is not supported", "expected multi-doc error")
+}
