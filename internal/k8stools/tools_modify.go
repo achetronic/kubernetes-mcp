@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/yaml"
 )
 
@@ -140,19 +141,25 @@ func (m *Manager) handleApplyManifest(ctx context.Context, request mcp.CallToolR
 		return errorResult(err), nil
 	}
 
-	// Already exists -> Update path. Need the live object for resourceVersion
-	// and to preserve server-set immutable fields.
-	live, getErr := nsClient.Get(ctx, obj.GetName(), metav1.GetOptions{})
-	if getErr != nil {
-		return errorResult(fmt.Errorf("resource exists but could not be fetched for update: %w", getErr)), nil
-	}
+	// Already exists -> Update path with retry-on-conflict, the same flow
+	// `kubectl apply` uses. Each retry re-reads the live object, copies the
+	// server-managed immutable fields and the latest resourceVersion, then
+	// re-issues the Update so we don't fight with the controller.
+	var updated *unstructured.Unstructured
+	retryErr := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		live, err := nsClient.Get(ctx, obj.GetName(), metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		mergeImmutableFields(obj, live, gvk)
+		obj.SetResourceVersion(live.GetResourceVersion())
 
-	mergeImmutableFields(obj, live, gvk)
-	obj.SetResourceVersion(live.GetResourceVersion())
-
-	updated, err := nsClient.Update(ctx, obj, metav1.UpdateOptions{})
-	if err != nil {
-		return errorResult(err), nil
+		var updErr error
+		updated, updErr = nsClient.Update(ctx, obj, metav1.UpdateOptions{})
+		return updErr
+	})
+	if retryErr != nil {
+		return errorResult(retryErr), nil
 	}
 
 	yamlOutput, _ := objectToYAML(updated)

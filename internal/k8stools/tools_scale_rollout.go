@@ -441,8 +441,33 @@ func (m *Manager) handleUndoRollout(ctx context.Context, request mcp.CallToolReq
 	}
 }
 
+// Annotations preserved on the Deployment when rolling back: kubectl propagates
+// these from the current object instead of restoring them from the target RS.
+// Mirrors kubectl/pkg/polymorphichelpers/rollback.go:annotationsToSkip.
+var deploymentRollbackAnnotationsToSkip = map[string]bool{
+	"kubectl.kubernetes.io/last-applied-configuration": true,
+	"deployment.kubernetes.io/revision":                true,
+	"deployment.kubernetes.io/revision-history":        true,
+	"deployment.kubernetes.io/desired-replicas":        true,
+	"deployment.kubernetes.io/max-replicas":            true,
+	"deprecated.deployment.rollback.to":                true,
+}
+
+// podTemplateHashLabel is the label the Deployment controller adds to every
+// ReplicaSet's pod template; it must be stripped before re-applying that
+// template onto the Deployment, otherwise the Deployment ends up with a
+// pinned hash and stops rolling out.
+const podTemplateHashLabel = "pod-template-hash"
+
 // undoDeploymentRollout implements rollback for apps/v1 Deployments by walking
 // the ReplicaSets owned by the deployment and selecting the target revision.
+//
+// The patch we send mirrors `kubectl rollout undo` byte-for-byte: an RFC 6902
+// JSON Patch with two replace operations on /spec/template and
+// /metadata/annotations. This guarantees that containers, init containers,
+// volumes etc. that exist only in the current template (and not in the target
+// revision) are dropped, instead of being silently merged in by a strategic
+// merge patch.
 func (m *Manager) undoDeploymentRollout(
 	ctx context.Context,
 	client *kubernetes.Client,
@@ -456,10 +481,16 @@ func (m *Manager) undoDeploymentRollout(
 		return errorResult(err), nil
 	}
 
-	currentRevision, _ := strconv.ParseInt(
-		nestedString(deployment.Object, "metadata", "annotations", "deployment.kubernetes.io/revision"),
-		10, 64,
-	)
+	// Read the deployment's current revision from its 'deployment.kubernetes.io/revision'
+	// annotation. We use a pointer-vs-zero distinction so we can tell "annotation
+	// missing" (currentRevision==nil → fall back to the highest history) apart
+	// from "annotation present and equal to 0" (corrupt or pre-revision deployment).
+	var currentRevision *int64
+	if rev := nestedString(deployment.Object, "metadata", "annotations", "deployment.kubernetes.io/revision"); rev != "" {
+		if parsed, err := strconv.ParseInt(rev, 10, 64); err == nil {
+			currentRevision = &parsed
+		}
+	}
 
 	rsGVR := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "replicasets"}
 	rsList, err := client.DynamicClient.Resource(rsGVR).Namespace(namespace).List(ctx, metav1.ListOptions{})
@@ -498,33 +529,83 @@ func (m *Manager) undoDeploymentRollout(
 	// Sort newest first.
 	sort.Slice(history, func(i, j int) bool { return history[i].revision > history[j].revision })
 
-	target, err := pickTargetRevision(history, currentRevision, toRevision, func(r rsRevision) int64 { return r.revision })
+	// If the deployment annotation was missing/unparseable, treat the highest
+	// revision as the current one (kubectl-compatible fallback).
+	effectiveCurrent := history[0].revision
+	if currentRevision != nil {
+		effectiveCurrent = *currentRevision
+	}
+
+	target, err := pickTargetRevision(history, effectiveCurrent, toRevision, func(r rsRevision) int64 { return r.revision })
 	if err != nil {
 		return errorResult(err), nil
 	}
 
-	template, found, _ := unstructured.NestedMap(target.obj.Object, "spec", "template")
-	if !found {
-		return errorResult(fmt.Errorf("target revision %d for deployment %s/%s has no spec.template", target.revision, namespace, name)), nil
+	patchBytes, err := buildDeploymentRollbackPatch(deployment, target.obj)
+	if err != nil {
+		return errorResult(err), nil
 	}
-
-	patch := map[string]any{
-		"spec": map[string]any{
-			"template": template,
-		},
-	}
-	patchBytes, _ := json.Marshal(patch)
 
 	if _, err := client.DynamicClient.Resource(gvr).Namespace(namespace).Patch(
-		ctx, name, types.StrategicMergePatchType, patchBytes, metav1.PatchOptions{}); err != nil {
+		ctx, name, types.JSONPatchType, patchBytes, metav1.PatchOptions{}); err != nil {
 		return errorResult(err), nil
 	}
 
 	return successResult(fmt.Sprintf("Successfully rolled back deployment %s/%s to revision %d", namespace, name, target.revision)), nil
 }
 
+// buildDeploymentRollbackPatch constructs the kubectl-compatible JSON Patch.
+// It mirrors getDeploymentPatch from
+// k8s.io/kubectl/pkg/polymorphichelpers/rollback.go:
+//
+//   - /spec/template ← target ReplicaSet's spec.template, with the
+//     'pod-template-hash' label stripped from template.metadata.labels.
+//   - /metadata/annotations ← rebuilt from scratch: keys in
+//     deploymentRollbackAnnotationsToSkip carried over from the current
+//     Deployment, all other annotations taken from the target RS.
+func buildDeploymentRollbackPatch(deployment, rs *unstructured.Unstructured) ([]byte, error) {
+	template, found, err := unstructured.NestedMap(rs.Object, "spec", "template")
+	if err != nil || !found {
+		return nil, fmt.Errorf("target replicaset %s has no spec.template", rs.GetName())
+	}
+	// Deep-copy is implicit: NestedMap returns a freshly built map. Drop the
+	// pod-template-hash label so the deployment isn't pinned to a stale hash.
+	if templateMeta, ok := template["metadata"].(map[string]any); ok {
+		if labels, ok := templateMeta["labels"].(map[string]any); ok {
+			delete(labels, podTemplateHashLabel)
+			if len(labels) == 0 {
+				delete(templateMeta, "labels")
+			}
+		}
+	}
+
+	depAnnotations, _, _ := unstructured.NestedStringMap(deployment.Object, "metadata", "annotations")
+	rsAnnotations, _, _ := unstructured.NestedStringMap(rs.Object, "metadata", "annotations")
+
+	merged := map[string]string{}
+	for k := range deploymentRollbackAnnotationsToSkip {
+		if v, ok := depAnnotations[k]; ok {
+			merged[k] = v
+		}
+	}
+	for k, v := range rsAnnotations {
+		if !deploymentRollbackAnnotationsToSkip[k] {
+			merged[k] = v
+		}
+	}
+
+	return json.Marshal([]any{
+		map[string]any{"op": "replace", "path": "/spec/template", "value": template},
+		map[string]any{"op": "replace", "path": "/metadata/annotations", "value": merged},
+	})
+}
+
 // undoControllerRevisionRollout implements rollback for apps/v1 StatefulSets
 // and DaemonSets, both of which use ControllerRevision objects to keep history.
+//
+// The ControllerRevision's data field is itself a strategic-merge patch
+// fragment scoped at spec (with $patch: replace under spec.template), so we
+// re-send it verbatim — exactly what `kubectl rollout undo` does.
 func (m *Manager) undoControllerRevisionRollout(
 	ctx context.Context,
 	client *kubernetes.Client,
@@ -539,13 +620,14 @@ func (m *Manager) undoControllerRevisionRollout(
 	}
 
 	parentUID := nestedString(parent.Object, "metadata", "uid")
-	parentGeneration, _, _ := unstructured.NestedInt64(parent.Object, "status", "currentRevision")
-	_ = parentGeneration // not used directly; we rely on the highest revision below current
 
-	// The "current" revision for SS/DS is recorded under
-	// status.currentRevision (a string of the ControllerRevision name) and
-	// status.observedGeneration. To keep things simple and provider-agnostic
-	// we treat the highest revision number present as "current".
+	// status.currentRevision holds the NAME of the ControllerRevision the
+	// controller currently has rolled out (a string, NOT a number). We use it
+	// to identify the current revision number in the history below; without
+	// this, after any prior undo the highest revision in history would be a
+	// future state and "rollback to N-1" would resolve incorrectly.
+	currentRevisionName := nestedString(parent.Object, "status", "currentRevision")
+
 	crGVR := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "controllerrevisions"}
 	crList, err := client.DynamicClient.Resource(crGVR).Namespace(namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {
@@ -558,6 +640,7 @@ func (m *Manager) undoControllerRevisionRollout(
 	}
 
 	var history []crRevision
+	var currentRevision int64
 	for i := range crList.Items {
 		item := &crList.Items[i]
 		if !ownedBy(item.Object, parentUID) {
@@ -568,6 +651,9 @@ func (m *Manager) undoControllerRevisionRollout(
 			continue
 		}
 		history = append(history, crRevision{revision: rev, obj: item})
+		if currentRevisionName != "" && item.GetName() == currentRevisionName {
+			currentRevision = rev
+		}
 	}
 
 	if len(history) == 0 {
@@ -575,7 +661,14 @@ func (m *Manager) undoControllerRevisionRollout(
 	}
 
 	sort.Slice(history, func(i, j int) bool { return history[i].revision > history[j].revision })
-	currentRevision := history[0].revision
+
+	// If the parent never reported status.currentRevision (e.g. brand new
+	// resource not yet observed by the controller, or a non-standard
+	// implementation), fall back to "highest revision is current". This
+	// matches the previous behaviour and is safe for the common case.
+	if currentRevision == 0 {
+		currentRevision = history[0].revision
+	}
 
 	target, err := pickTargetRevision(history, currentRevision, toRevision, func(r crRevision) int64 { return r.revision })
 	if err != nil {
