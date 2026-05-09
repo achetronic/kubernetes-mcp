@@ -40,6 +40,15 @@ Full cluster management through natural language:
 | **RBAC & Metrics**  | `check_permission`, `get_pod_metrics`, `get_node_metrics`                        |
 | **Diff**            | `diff_manifest`                                                                  |
 
+All resource-addressing tools take **GVR** parameters: `group` + `version` + `resource` (plural lowercase form, e.g. `pods`, `deployments`, `ingresses`, `storageclasses`). NOT the Kind. The two manifest tools (`apply_manifest`, `diff_manifest`) parse `apiVersion`/`kind` from the YAML and resolve the GVR via the cluster's discovery API, so CRDs and irregular plurals work transparently.
+
+Built-in safety rails:
+
+- `apply_manifest` rejects multi-document YAML and reports `created` vs `updated`.
+- `delete_resources` requires either `namespace` or an explicit `all_namespaces=true` (mutually exclusive), and refuses to delete more than `kubernetes.tools.bulk_operations.max_resources_per_operation` items per call (default 100).
+- `get_logs` truncates output at 1 MiB; `exec_command` is non-interactive, supports a configurable `timeout_seconds` (1..300, default 30) and caps stdout+stderr at 1 MiB.
+- `restart_rollout` / `undo_rollout` only operate on `apps/{deployments,statefulsets,daemonsets}`; `undo_rollout` defaults to N-1 (kubectl-compatible) and reads ReplicaSet history for Deployments / ControllerRevisions for StatefulSets and DaemonSets.
+
 </details>
 
 <details>
@@ -144,8 +153,10 @@ kubernetes:
   default_context: "default"
   contexts:
     - name: "default"
-      kubeconfig: "" # Uses ~/.kube/config
+      kubeconfig: "" # Empty: $KUBECONFIG -> ~/.kube/config -> in-cluster
       description: "Local cluster"
+  discovery:
+    refresh_interval: "10m"
 
 authorization:
   allow_anonymous: true
@@ -207,6 +218,8 @@ kubernetes:
     - name: "default"
       kubeconfig: "/root/.kube/config"
       description: "My Kubernetes cluster"
+  discovery:
+    refresh_interval: "10m"
 
 authorization:
   allow_anonymous: true
@@ -340,8 +353,16 @@ kubernetes:
   # Auto-load kubeconfigs from directory (context name = current-context of each file)
   # contexts_dir: "/etc/kubernetes/clusters/"
 
+  # API discovery cache. Used by the RESTMapper to resolve Kind -> Resource for
+  # apply_manifest / diff_manifest, and to detect newly installed CRDs.
+  # The cache is invalidated periodically with this interval. Default: 10m.
+  discovery:
+    refresh_interval: "10m"
+
   tools:
     bulk_operations:
+      # Hard cap on the number of resources delete_resources may match in a
+      # single call. Selectors that match more are rejected. Default: 100.
       max_resources_per_operation: 100
 
 # Authorization Configuration
@@ -680,7 +701,7 @@ The AI will use:
 ```yaml
 tool: list_resources
 version: v1
-kind: Pod
+resource: pods       # plural lowercase GVR, NOT the Kind
 namespace: production
 yq_expressions:
   - '.items[] | select(.status.phase != "Running") | {name: .metadata.name, phase: .status.phase}'
@@ -788,27 +809,40 @@ make vet
 # Lint (auto-installs golangci-lint)
 make lint
 
-# Run all unit tests (integration tests auto-skip without KUBE_CONTEXT)
-go test ./internal/authorization/ -v -count=1
+# Unit tests (no cluster needed)
+make test
 
-# Run integration tests against a live cluster
-KUBE_CONTEXT=kind-my-cluster go test ./internal/authorization/ -run TestIntegration -v -count=1
+# End-to-end tests against a Kind cluster
+#   - 'kind-up'       creates a local Kind cluster (idempotent)
+#   - 'test-e2e'      runs the e2e suite (build tag 'e2e')
+#   - 'kind-down'     deletes the cluster
+#   - 'test-e2e-clean' = down + up + tests + down (CI-style)
+make test-e2e
+make test-e2e-clean
 
-# Run specific integration test
-KUBE_CONTEXT=kind-my-cluster go test ./internal/authorization/ -run TestIntegration_LiveDeleteVerdicts -v -count=1
+# Run e2e against an existing cluster (no Kind dance)
+KMCP_E2E_CONTEXT=$(kubectl config current-context) \
+  go test -tags=e2e -timeout 10m ./internal/k8stools/...
 ```
 
-#### Integration Tests
+#### End-to-End Tests
 
-The authorization package includes integration tests that validate RBAC policies against a real Kubernetes cluster. They are **dynamic** — they discover all resources in the cluster at runtime and verify every tool/resource combination against the policy.
+The e2e suite lives in `internal/k8stools/e2e_*_test.go` (build tag `e2e`). It exercises every tool against a real cluster, with each test running in its own throw-away namespace. Coverage includes:
 
-| Test | What it does |
-|------|--------------|
-| `TestIntegration_SafeOpsAgainstRealCluster` | Evaluates all 8 tools against every discovered resource, prints summary tables by resource type, tool, and namespace |
-| `TestIntegration_DiscoveryReport` | Prints an API type authorization matrix for every resource type in the cluster |
-| `TestIntegration_LiveDeleteVerdicts` | Exhaustive delete/apply/patch verification with zero-violation assertion |
+| Area | Highlights |
+|------|-----------|
+| Read | `get_resource`, `list_resources` filters, `describe_resource` with events resolved via RESTMapper |
+| Modify | `apply_manifest` create/update round-trip preserving `Service.clusterIP`, multi-doc rejection, patch types, delete + bulk cap + cross-namespace barrier |
+| Scale / Rollout | scale, rollout status (Deployment / StatefulSet / DaemonSet), restart, **undo for all three workload kinds** |
+| Cluster info | `list_namespaces`, `list_api_resources` (group / namespaced filters), `list_api_versions`, `get_cluster_info` |
+| Logs / exec / events | log retrieval and tail, exec with output cap, events sorted by timestamp and filtered by type/field selector |
+| RBAC / metrics | `check_permission` including subresource (`pods/exec`), graceful degradation when metrics-server is missing |
+| Discovery | newly-installed CRDs become visible after `RESTMapper.Reset()` |
+| Hardening | empty-patch rejection, `replicas` validation, `propagation_policy` validation, `delete_resources` element cap, `apply_manifest` create-vs-update |
 
-Set `KUBE_CONTEXT` to run them. They skip automatically when the variable is unset, so regular `go test` is safe. Optionally set `KUBECONFIG` to point to a non-default kubeconfig file.
+Set `KMCP_E2E_CONTEXT` to the kubeconfig context to use (defaults to the kubeconfig's current-context). Tests skip metrics happy paths when metrics-server is not installed.
+
+CI runs the same suite on every PR and push to `master` via [`.github/workflows/e2e-tests.yaml`](.github/workflows/e2e-tests.yaml) using `helm/kind-action`.
 
 ### Building Docker Image
 

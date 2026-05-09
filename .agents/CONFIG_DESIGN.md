@@ -1,5 +1,25 @@
 # Kubernetes MCP - Configuration Design
 
+> **Status: historical design document.**
+> This file captures the proposal that drove the multi-cluster + tool-level
+> RBAC implementation. The shipped behaviour and current YAML schema have
+> diverged in several places; treat this as design context, not as the
+> authoritative reference. The authoritative sources are:
+>
+> - `.agents/AGENTS.md` — current architecture, kubeconfig resolution,
+>   policy schema, evaluation rules.
+> - `api/config_types.go` — exact YAML keys consumed by the binary.
+> - `internal/authorization/evaluator.go` — actual evaluator, glob
+>   matching, deny-wins precedence.
+>
+> Notable differences vs. this document:
+> - Policies use `rules: [{ effect: allow|deny, ... }]` instead of the
+>   top-level `allow:` / `deny:` blocks shown here.
+> - `label_prefixes` / `annotation_prefixes` are NOT implemented; only
+>   `tools`, `contexts`, and `resources` filters exist.
+> - Evaluation is **deny-wins**, not "most permissive wins"; the merge
+>   model is now flat across matched policies.
+
 Extension of the current config to support multi-cluster and tool-level RBAC.
 
 ## Philosophy

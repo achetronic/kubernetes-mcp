@@ -94,15 +94,12 @@ func NewClientManager(logger *slog.Logger, config *api.KubernetesConfig) (*Clien
 		cm.clients[ctxConfig.Name] = client
 		cm.contextsByName[ctxConfig.Name] = ctxConfig
 
-		// Track file for watching (resolve default path if empty)
-		kubeconfigPath := ctxConfig.Kubeconfig
-		if kubeconfigPath == "" {
-			if home := os.Getenv("HOME"); home != "" {
-				kubeconfigPath = filepath.Join(home, ".kube", "config")
-			}
-		}
-		if kubeconfigPath != "" {
-			cm.trackFile(kubeconfigPath, ctxConfig.Name)
+		// Track the kubeconfig file for inotify-based reloads. We only watch
+		// when the user pointed at a specific file: in-cluster credentials
+		// don't live on disk, and the implicit ~/.kube/config / $KUBECONFIG
+		// chain may resolve to nothing.
+		if ctxConfig.Kubeconfig != "" {
+			cm.trackFile(ctxConfig.Kubeconfig, ctxConfig.Name)
 		}
 	}
 
@@ -406,38 +403,43 @@ func (cm *ClientManager) Stop() {
 	}
 }
 
-// createClient creates a kubernetes client for a given context configuration
+// createClient creates a kubernetes client for a given context configuration.
+//
+// Resolution order (mirrors `kubectl` / client-go semantics):
+//  1. If ctxConfig.Kubeconfig is set explicitly, use that file. A failure
+//     is fatal — we don't silently fall back, otherwise the operator may
+//     end up talking to the wrong cluster.
+//  2. If $KUBECONFIG is set in the environment, use that. Multi-path
+//     KUBECONFIG values (':'-separated) are honoured by clientcmd's default
+//     loading rules.
+//  3. If ~/.kube/config exists and is readable, use it.
+//  4. Otherwise, fall back to in-cluster configuration. This is what
+//     happens when the binary runs as a Pod with a service-account token
+//     mounted at /var/run/secrets/kubernetes.io/serviceaccount.
+//  5. If none of the above succeed, return a single descriptive error
+//     listing what was tried.
 func (cm *ClientManager) createClient(name string, ctxConfig api.KubernetesContextConfig) (*Client, error) {
 	var restConfig *rest.Config
 	var err error
 
-	kubeconfigPath := ctxConfig.Kubeconfig
-	if kubeconfigPath == "" {
-		// Try default kubeconfig location
-		if home := os.Getenv("HOME"); home != "" {
-			kubeconfigPath = filepath.Join(home, ".kube", "config")
-		}
-	}
-
-	if kubeconfigPath != "" {
-		// Build config from kubeconfig file
-		loadingRules := &clientcmd.ClientConfigLoadingRules{ExplicitPath: kubeconfigPath}
+	switch {
+	case ctxConfig.Kubeconfig != "":
+		// Explicit path. Honour KubeconfigContext if provided.
+		loadingRules := &clientcmd.ClientConfigLoadingRules{ExplicitPath: ctxConfig.Kubeconfig}
 		configOverrides := &clientcmd.ConfigOverrides{}
-
 		if ctxConfig.KubeconfigContext != "" {
 			configOverrides.CurrentContext = ctxConfig.KubeconfigContext
 		}
-
 		kubeConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, configOverrides)
-		restConfig, err = kubeConfig.ClientConfig()
-		if err != nil {
-			return nil, fmt.Errorf("failed to build config from kubeconfig: %w", err)
+		if restConfig, err = kubeConfig.ClientConfig(); err != nil {
+			return nil, fmt.Errorf("failed to build config from kubeconfig %q: %w", ctxConfig.Kubeconfig, err)
 		}
-	} else {
-		// Try in-cluster config
-		restConfig, err = rest.InClusterConfig()
+
+	default:
+		// Implicit resolution: $KUBECONFIG, then ~/.kube/config, then in-cluster.
+		restConfig, err = resolveImplicitConfig(ctxConfig.KubeconfigContext)
 		if err != nil {
-			return nil, fmt.Errorf("failed to build in-cluster config: %w", err)
+			return nil, err
 		}
 	}
 
@@ -472,6 +474,71 @@ func (cm *ClientManager) createClient(name string, ctxConfig api.KubernetesConte
 		DiscoveryClient: cachedDiscovery,
 		RESTMapper:      mapper,
 	}, nil
+}
+
+// resolveImplicitConfig builds a *rest.Config without an explicit kubeconfig
+// path, walking the same precedence client-go itself documents:
+//
+//  1. $KUBECONFIG (single path or ':'-separated list).
+//  2. ~/.kube/config if it exists and is readable.
+//  3. In-cluster config (when running inside a Pod with a service-account
+//     token mounted at /var/run/secrets/kubernetes.io/serviceaccount).
+//
+// We try (1) and (2) before (3) because client-go's NewDefaultClientConfigLoadingRules
+// returns a non-nil config even when the user has no kubeconfig at all
+// (it just points at $HOME/.kube/config). The kubeConfig.ClientConfig()
+// call then fails with a "no configuration has been provided" style error,
+// which historically masked in-cluster operation. We treat any failure of
+// (1)+(2) as "fall through to in-cluster" instead of bubbling it up.
+func resolveImplicitConfig(kubeconfigContext string) (*rest.Config, error) {
+	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
+	if !kubeconfigChainExists(loadingRules) {
+		// Skip straight to in-cluster — no kubeconfig is reachable.
+		return inClusterConfigOrError(nil)
+	}
+
+	overrides := &clientcmd.ConfigOverrides{}
+	if kubeconfigContext != "" {
+		overrides.CurrentContext = kubeconfigContext
+	}
+	kubeConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, overrides)
+	cfg, err := kubeConfig.ClientConfig()
+	if err == nil {
+		return cfg, nil
+	}
+	// kubeconfig was reachable but unusable (empty, broken, requested
+	// context missing, ...). Try in-cluster as a last resort and surface
+	// both failures so the operator can tell which path they intended.
+	return inClusterConfigOrError(err)
+}
+
+// kubeconfigChainExists reports whether at least one of the kubeconfig
+// candidate paths (KUBECONFIG / ~/.kube/config) actually exists on disk.
+func kubeconfigChainExists(rules *clientcmd.ClientConfigLoadingRules) bool {
+	for _, p := range rules.Precedence {
+		if p == "" {
+			continue
+		}
+		if info, err := os.Stat(p); err == nil && !info.IsDir() {
+			return true
+		}
+	}
+	return false
+}
+
+// inClusterConfigOrError returns the in-cluster *rest.Config if available;
+// otherwise it returns a descriptive error that includes the previous
+// kubeconfig failure (if any) so the operator can diagnose configuration
+// issues without spelunking through logs.
+func inClusterConfigOrError(prevErr error) (*rest.Config, error) {
+	cfg, err := rest.InClusterConfig()
+	if err == nil {
+		return cfg, nil
+	}
+	if prevErr != nil {
+		return nil, fmt.Errorf("could not build a Kubernetes client: kubeconfig failed (%v) and in-cluster config failed (%w)", prevErr, err)
+	}
+	return nil, fmt.Errorf("no kubeconfig found and in-cluster config not available: %w", err)
 }
 
 // GetClient returns the client for a given context

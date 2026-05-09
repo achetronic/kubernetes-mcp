@@ -149,7 +149,9 @@ configMaps:
           default_context: "default"
           contexts:
             - name: "default"
-              # Path to kubeconfig file (empty uses in-cluster config or ~/.kube/config)
+              # Path to kubeconfig file. Leave empty to use the implicit
+              # resolution chain: $KUBECONFIG, then ~/.kube/config, then
+              # in-cluster credentials (Pod service-account token).
               kubeconfig: ""
               # Optional: use specific context from kubeconfig file
               # kubeconfig_context: "gke_myproject_prod"
@@ -182,30 +184,34 @@ configMaps:
               description: "Allow all operations (configure for production!)"
               match:
                 expression: "true"
-              allow:
-                tools: ["*"]
-                contexts: ["*"]
+              rules:
+                - effect: allow
+                  tools: ["*"]
+                  contexts: ["*"]
             
             # Example: SRE team with full access
             #- name: "sre-full-access"
             #  description: "SRE team has full access"
             #  match:
             #    expression: 'payload.groups.exists(g, g == "sre-team")'
-            #  allow:
-            #    tools: ["*"]
-            #    contexts: ["*"]
+            #  rules:
+            #    - effect: allow
+            #      tools: ["*"]
+            #      contexts: ["*"]
             
-            # Example: Developers with limited access
+            # Example: Developers with limited access — read-only in prod,
+            # explicit deny for destructive tools.
             #- name: "developers-limited"
             #  description: "Developers: read-only in production"
             #  match:
             #    expression: 'payload.groups.exists(g, g == "developers")'
-            #  allow:
-            #    tools: ["get_*", "list_*", "describe_*"]
-            #    contexts: ["*"]
-            #  deny:
-            #    tools: ["delete_*", "exec_command"]
-            #    contexts: ["production"]
+            #  rules:
+            #    - effect: allow
+            #      tools: ["get_*", "list_*", "describe_*"]
+            #      contexts: ["*"]
+            #    - effect: deny
+            #      tools: ["delete_*", "exec_command"]
+            #      contexts: ["production"]
 
 persistence:
   configuration:

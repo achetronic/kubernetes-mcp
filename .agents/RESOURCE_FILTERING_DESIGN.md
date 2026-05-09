@@ -1,5 +1,17 @@
 # Resource-Level Authorization Design
 
+> **Status: historical design document.**
+> The shipped implementation evolved on top of this proposal. Two
+> divergences worth highlighting before reading on:
+>
+> - The matching dimension is **Resource (lowercase plural)**, not Kind.
+>   Filters are written as `resources: ["pods", "deployments", ...]`.
+> - Policies are written as `rules: [{ effect: allow|deny, resources: [...] }]`
+>   instead of the top-level `allow:` / `deny:` blocks shown below.
+>
+> See `.agents/AGENTS.md` and `internal/authorization/evaluator.go` for the
+> current behaviour.
+
 ## Goal
 
 Extend authorization policies to allow/deny access based on:

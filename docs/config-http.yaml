@@ -73,7 +73,7 @@ kubernetes:
   default_context: "default"
   contexts:
     - name: "default"
-      kubeconfig: ""  # Uses ~/.kube/config
+      kubeconfig: ""  # Empty: $KUBECONFIG -> ~/.kube/config -> in-cluster
       description: "Default Kubernetes cluster"
       allowed_namespaces: []
       denied_namespaces:
