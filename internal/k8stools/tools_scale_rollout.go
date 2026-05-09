@@ -37,16 +37,19 @@ import (
 func (m *Manager) registerScaleResource() {
 	tool := mcp.NewTool(m.toolName("scale_resource"),
 		mcp.WithDescription(`Set the number of replicas of a scalable workload (Deployment,
-StatefulSet, ReplicaSet, ...).
+StatefulSet, ReplicaSet).
 
 Equivalent to 'kubectl scale --replicas=N'. Setting replicas to 0 stops
 the workload without deleting it; restoring the value brings it back.
 
-For non-scalable kinds (Pods, DaemonSets, ...) this call will fail.`),
+DaemonSets are NOT supported: they have no 'spec.replicas' (one Pod per
+node) and a patch on the field would be silently ignored by the
+controller. The tool rejects DaemonSet GVRs explicitly so the call does
+not look successful while doing nothing.`),
 		mcp.WithString("context", mcp.Description("Kubernetes context to target. If empty, uses the currently active MCP context.")),
-		mcp.WithString("group", mcp.Description("API group. Defaults to 'apps' which covers Deployment / StatefulSet / ReplicaSet.")),
+		mcp.WithString("group", mcp.Description("API group. Defaults to 'apps'.")),
 		mcp.WithString("version", mcp.Required(), mcp.Description("API version, typically 'v1'.")),
-		mcp.WithString("resource", mcp.Required(), mcp.Description("Lowercase plural: 'deployments', 'statefulsets', 'replicasets'. NOT the Kind.")),
+		mcp.WithString("resource", mcp.Required(), mcp.Description("Lowercase plural: 'deployments', 'statefulsets', 'replicasets'. NOT 'daemonsets' (cannot be scaled). NOT the Kind.")),
 		mcp.WithString("name", mcp.Required(), mcp.Description("Name of the workload to scale.")),
 		mcp.WithString("namespace", mcp.Description("Namespace where the workload lives. Required (these kinds are namespaced).")),
 		mcp.WithNumber("replicas", mcp.Required(), mcp.Description("Desired replica count. Must be an integer >= 0. Use 0 to stop the workload without deleting it.")),
@@ -77,6 +80,12 @@ func (m *Manager) handleScaleResource(ctx context.Context, request mcp.CallToolR
 	}
 	if replicas < 0 || replicas != float64(int64(replicas)) {
 		return errorResult(fmt.Errorf("replicas must be a non-negative integer, got %v", replicas)), nil
+	}
+	if gvr.Group != "apps" || !scaleSupportedResource(gvr.Resource) {
+		// DaemonSets are intentionally rejected: they have no spec.replicas
+		// and a merge patch on it is silently ignored by the controller,
+		// which would make the tool look successful while doing nothing.
+		return errorResult(fmt.Errorf("scale_resource is only supported for apps/{deployments,statefulsets,replicasets}; got %s/%s", gvr.Group, gvr.Resource)), nil
 	}
 
 	// Check authorization
@@ -163,6 +172,9 @@ func (m *Manager) handleGetRolloutStatus(ctx context.Context, request mcp.CallTo
 	if namespace == "" {
 		return errorResult(fmt.Errorf("namespace is required for %s", gvr.Resource)), nil
 	}
+	if gvr.Group != "apps" || !rolloutSupportedResource(gvr.Resource) {
+		return errorResult(fmt.Errorf("get_rollout_status is only supported for apps/{deployments,statefulsets,daemonsets}; got %s/%s", gvr.Group, gvr.Resource)), nil
+	}
 
 	// Check authorization
 	if err := m.checkAuthorization(request, "get_rollout_status", k8sContext, namespace, authorization.ResourceInfo{
@@ -224,7 +236,9 @@ func formatRolloutStatus(obj *unstructured.Unstructured, gvr schema.GroupVersion
 		} else {
 			available = ready
 		}
-	default: // deployments and anything else with replicas-style status
+	default: // deployments (the public handler restricts to the three apps/v1
+		// rollout kinds; this branch covers Deployments and acts as a safe
+		// fallback for any future addition that uses replicas-style status).
 		desired, _, _ = unstructured.NestedInt64(spec, "replicas")
 		ready, _, _ = unstructured.NestedInt64(status, "readyReplicas")
 		updated, _, _ = unstructured.NestedInt64(status, "updatedReplicas")
@@ -352,10 +366,23 @@ func (m *Manager) handleRestartRollout(ctx context.Context, request mcp.CallTool
 }
 
 // rolloutSupportedResource reports whether a resource has a meaningful rollout
-// (deployments, statefulsets, daemonsets). Used to whitelist restart_rollout.
+// (deployments, statefulsets, daemonsets). Used to whitelist restart_rollout
+// and get_rollout_status.
 func rolloutSupportedResource(resource string) bool {
 	switch resource {
 	case "deployments", "statefulsets", "daemonsets":
+		return true
+	}
+	return false
+}
+
+// scaleSupportedResource reports whether a resource has a 'spec.replicas'
+// field that the apps/v1 controllers honour. DaemonSets are deliberately
+// excluded: their cardinality is one-per-node and a 'spec.replicas' patch on
+// them is silently ignored.
+func scaleSupportedResource(resource string) bool {
+	switch resource {
+	case "deployments", "statefulsets", "replicasets":
 		return true
 	}
 	return false
