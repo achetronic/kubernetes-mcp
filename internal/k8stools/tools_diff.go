@@ -141,29 +141,21 @@ func (m *Manager) handleDiffManifest(ctx context.Context, request mcp.CallToolRe
 	return successResult(output), nil
 }
 
-// compareObjects compares two maps and returns a list of differences
+// compareObjects compares two maps and returns a list of differences.
+// It applies a "strip" pass to both sides to ignore server-managed fields
+// that produce false positives (last-applied-configuration, finalizers,
+// cluster-assigned IPs, etc.) before walking the structure.
 func compareObjects(current, desired map[string]any, path string) []string {
-	var diffs []string
-
-	// Skip metadata fields that are auto-managed
-	skipFields := map[string]bool{
-		"metadata.resourceVersion":   true,
-		"metadata.uid":               true,
-		"metadata.creationTimestamp": true,
-		"metadata.generation":        true,
-		"metadata.managedFields":     true,
-		"metadata.selfLink":          true,
-		"status":                     true,
+	if path == "" {
+		current = stripServerManagedFields(current)
+		desired = stripServerManagedFields(desired)
 	}
+	var diffs []string
 
 	for key, desiredVal := range desired {
 		currentPath := key
 		if path != "" {
 			currentPath = path + "." + key
-		}
-
-		if skipFields[currentPath] {
-			continue
 		}
 
 		currentVal, exists := current[key]
@@ -182,7 +174,7 @@ func compareObjects(current, desired map[string]any, path string) []string {
 			}
 		case []any:
 			if cv, ok := currentVal.([]any); ok {
-				if !slicesEqual(cv, dv) {
+				if !slicesEqualNormalized(cv, dv) {
 					diffs = append(diffs, fmt.Sprintf("~ %s: array changed", currentPath))
 				}
 			} else {
@@ -201,17 +193,99 @@ func compareObjects(current, desired map[string]any, path string) []string {
 		if path != "" {
 			currentPath = path + "." + key
 		}
-
-		if skipFields[currentPath] {
-			continue
-		}
-
 		if _, exists := desired[key]; !exists {
 			diffs = append(diffs, fmt.Sprintf("- %s: %v", currentPath, summarizeValue(current[key])))
 		}
 	}
 
 	return diffs
+}
+
+// stripServerManagedFields removes fields that the API server adds or owns
+// from a deep copy of the input. Returning a copy avoids mutating the
+// caller's map. Only top-level structural fields are walked; nested
+// 'metadata' keys are removed in place.
+func stripServerManagedFields(in map[string]any) map[string]any {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	// Drop the entire status subtree — it's controller-owned, never relevant
+	// for what the user is about to apply.
+	delete(out, "status")
+
+	if md, ok := out["metadata"].(map[string]any); ok {
+		mdCopy := make(map[string]any, len(md))
+		for k, v := range md {
+			mdCopy[k] = v
+		}
+		// Server-managed metadata fields. Removing them on BOTH sides means
+		// they cannot show up as diffs.
+		for _, f := range []string{
+			"resourceVersion",
+			"uid",
+			"creationTimestamp",
+			"deletionTimestamp",
+			"deletionGracePeriodSeconds",
+			"generation",
+			"managedFields",
+			"selfLink",
+			"finalizers",
+			"ownerReferences",
+		} {
+			delete(mdCopy, f)
+		}
+		// last-applied-configuration is added by `kubectl apply`. It always
+		// represents the previous version, never the current one — strip it.
+		if ann, ok := mdCopy["annotations"].(map[string]any); ok {
+			annCopy := make(map[string]any, len(ann))
+			for k, v := range ann {
+				if k == "kubectl.kubernetes.io/last-applied-configuration" {
+					continue
+				}
+				annCopy[k] = v
+			}
+			if len(annCopy) == 0 {
+				delete(mdCopy, "annotations")
+			} else {
+				mdCopy["annotations"] = annCopy
+			}
+		}
+		out["metadata"] = mdCopy
+	}
+
+	// Service: clusterIP / clusterIPs / ipFamilies are server-assigned the
+	// first time and immutable thereafter. Stripping them from current avoids
+	// "removed" diffs when the user submits a manifest without them.
+	kind, _ := out["kind"].(string)
+	if kind == "Service" {
+		if spec, ok := out["spec"].(map[string]any); ok {
+			specCopy := make(map[string]any, len(spec))
+			for k, v := range spec {
+				specCopy[k] = v
+			}
+			delete(specCopy, "clusterIP")
+			delete(specCopy, "clusterIPs")
+			delete(specCopy, "ipFamilies")
+			delete(specCopy, "ipFamilyPolicy")
+			out["spec"] = specCopy
+		}
+	}
+	if kind == "PersistentVolumeClaim" {
+		if spec, ok := out["spec"].(map[string]any); ok {
+			specCopy := make(map[string]any, len(spec))
+			for k, v := range spec {
+				specCopy[k] = v
+			}
+			delete(specCopy, "volumeName")
+			out["spec"] = specCopy
+		}
+	}
+
+	return out
 }
 
 func summarizeValue(v any) string {
@@ -230,13 +304,93 @@ func summarizeValue(v any) string {
 	}
 }
 
-func slicesEqual(a, b []any) bool {
+// slicesEqualNormalized compares two slices for content equality, ignoring
+// order when all elements are scalars or maps with a 'name' key (a common
+// pattern in container ports / env / volumeMounts). For mixed or nested-list
+// content we fall back to ordered comparison.
+func slicesEqualNormalized(a, b []any) bool {
 	if len(a) != len(b) {
 		return false
 	}
-	// Simple comparison - for complex nested structures this would need more work
+	if isUnorderedScalar(a) && isUnorderedScalar(b) {
+		return scalarSetEqual(a, b)
+	}
+	if isNamedMapList(a) && isNamedMapList(b) {
+		return namedMapListEqual(a, b)
+	}
+	// Fallback: ordered, stringified compare.
 	for i := range a {
 		if fmt.Sprintf("%v", a[i]) != fmt.Sprintf("%v", b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func isUnorderedScalar(s []any) bool {
+	for _, v := range s {
+		switch v.(type) {
+		case string, float64, int64, int, bool, nil:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func scalarSetEqual(a, b []any) bool {
+	count := func(in []any) map[string]int {
+		m := make(map[string]int, len(in))
+		for _, v := range in {
+			m[fmt.Sprintf("%v", v)]++
+		}
+		return m
+	}
+	ca, cb := count(a), count(b)
+	if len(ca) != len(cb) {
+		return false
+	}
+	for k, v := range ca {
+		if cb[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+func isNamedMapList(s []any) bool {
+	for _, v := range s {
+		m, ok := v.(map[string]any)
+		if !ok {
+			return false
+		}
+		if _, hasName := m["name"]; !hasName {
+			return false
+		}
+	}
+	return true
+}
+
+func namedMapListEqual(a, b []any) bool {
+	index := func(in []any) map[string]any {
+		out := make(map[string]any, len(in))
+		for _, v := range in {
+			m := v.(map[string]any)
+			name, _ := m["name"].(string)
+			out[name] = m
+		}
+		return out
+	}
+	ia, ib := index(a), index(b)
+	if len(ia) != len(ib) {
+		return false
+	}
+	for k, va := range ia {
+		vb, ok := ib[k]
+		if !ok {
+			return false
+		}
+		if fmt.Sprintf("%v", va) != fmt.Sprintf("%v", vb) {
 			return false
 		}
 	}

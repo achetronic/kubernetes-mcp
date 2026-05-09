@@ -29,8 +29,8 @@ func TestE2E_CheckPermission_AllowedForClusterAdmin(t *testing.T) {
 	}
 	out := expectOK(t, res, "check_permission list pods")
 	requireContains(t, out, "Permission check: allowed", "expected allowed")
-	requireContains(t, out, "Verb:      list", "expected verb in summary")
-	requireContains(t, out, "Resource:  pods", "expected resource in summary")
+	requireContains(t, out, "Verb:        list", "expected verb in summary")
+	requireContains(t, out, "Resource:    pods", "expected resource in summary")
 }
 
 func TestE2E_CheckPermission_NamedResource(t *testing.T) {
@@ -49,8 +49,8 @@ func TestE2E_CheckPermission_NamedResource(t *testing.T) {
 	}
 	out := expectOK(t, res, "check_permission with name")
 	requireContains(t, out, "Permission check: allowed", "expected allowed")
-	requireContains(t, out, "Name:      any-name", "expected name in summary")
-	requireContains(t, out, "Namespace: "+e.namespace, "expected namespace in summary")
+	requireContains(t, out, "Name:        any-name", "expected name in summary")
+	requireContains(t, out, "Namespace:   "+e.namespace, "expected namespace in summary")
 }
 
 func TestE2E_CheckPermission_UnknownVerbStillReports(t *testing.T) {

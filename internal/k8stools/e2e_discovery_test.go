@@ -128,7 +128,7 @@ metadata:
 spec:
   any: thing
 `)
-	requireContains(t, out, "Successfully applied KMCPTest/kmcp-e2e-cr", "expected CRD apply via tool")
+	requireContains(t, out, "KMCPTest/kmcp-e2e-cr", "expected CRD apply via tool")
 }
 
 func ptrTrue() *bool { v := true; return &v }

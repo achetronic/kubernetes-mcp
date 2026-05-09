@@ -38,7 +38,7 @@ flag and supported verbs.
 If 'list_resources' fails with "the server could not find the requested
 resource", run this tool first to confirm the GVR exists.`),
 		mcp.WithString("context", mcp.Description("Kubernetes context to target. If empty, uses the currently active MCP context.")),
-		mcp.WithString("api_group", mcp.Description("Restrict the listing to a single API group. Empty string \"\" matches the core API. Examples: 'apps', 'networking.k8s.io', 'storage.k8s.io'. Omit to list every group.")),
+		mcp.WithString("api_group", mcp.Description("Restrict the listing to a single API group. Examples: 'apps', 'networking.k8s.io', 'storage.k8s.io'. Pass an empty string to match the core API only ('pods', 'configmaps', ...). Omit the parameter entirely to list every group.")),
 		mcp.WithBoolean("namespaced", mcp.Description("If set, return only namespaced (true) or only cluster-scoped (false) resources. Omit for no filtering.")),
 		mcp.WithArray("yq_expressions", mcp.Description("Optional yq expressions applied to the YAML output (a top-level array, NOT a List object — use '.[]'). Examples: '.[].name' (all plural names), '.[] | select(.namespaced == true) | .name' (namespaced names), 'map(select(.group == \"apps\"))' (apps group only).")),
 	)
@@ -49,7 +49,7 @@ func (m *Manager) handleListAPIResources(ctx context.Context, request mcp.CallTo
 	args := request.GetArguments()
 
 	k8sContext := m.getContextParam(args)
-	apiGroup, _ := args["api_group"].(string)
+	apiGroup, hasAPIGroup := args["api_group"].(string)
 	namespacedFilter, hasNamespacedFilter := args["namespaced"].(bool)
 
 	// Check authorization (virtual resource: _/APIDiscovery)
@@ -89,18 +89,19 @@ func (m *Manager) handleListAPIResources(ctx context.Context, request mcp.CallTo
 		gv := list.GroupVersion
 		group := ""
 		version := gv
-		if idx := len(gv) - 1; idx > 0 {
-			for i := idx; i >= 0; i-- {
-				if gv[i] == '/' {
-					group = gv[:i]
-					version = gv[i+1:]
-					break
-				}
+		for i := len(gv) - 1; i >= 0; i-- {
+			if gv[i] == '/' {
+				group = gv[:i]
+				version = gv[i+1:]
+				break
 			}
 		}
 
-		// Filter by API group if specified
-		if apiGroup != "" && group != apiGroup {
+		// Filter by API group:
+		//   - omit parameter         => no filter
+		//   - empty string ("")      => core API only (group == "")
+		//   - non-empty string       => exact match
+		if hasAPIGroup && group != apiGroup {
 			continue
 		}
 
@@ -222,18 +223,24 @@ func (m *Manager) handleGetClusterInfo(ctx context.Context, request mcp.CallTool
 		return errorResult(err), nil
 	}
 
-	// Get node count
+	// Get node count. Use a sentinel of -1 + an 'errors' map so the model can
+	// tell "no nodes" from "RBAC denied".
+	infoErrors := map[string]string{}
 	nodes, err := client.Clientset.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
-	nodeCount := 0
+	nodeCount := -1
 	if err == nil {
 		nodeCount = len(nodes.Items)
+	} else {
+		infoErrors["node_count"] = err.Error()
 	}
 
-	// Get namespace count
+	// Get namespace count, same treatment.
 	namespaces, err := client.Clientset.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
-	nsCount := 0
+	nsCount := -1
 	if err == nil {
 		nsCount = len(namespaces.Items)
+	} else {
+		infoErrors["namespace_count"] = err.Error()
 	}
 
 	// Get context config
@@ -247,6 +254,9 @@ func (m *Manager) handleGetClusterInfo(ctx context.Context, request mcp.CallTool
 		"node_count":      nodeCount,
 		"namespace_count": nsCount,
 		"host":            client.Config.Host,
+	}
+	if len(infoErrors) > 0 {
+		info["errors"] = infoErrors
 	}
 
 	yamlOutput, err := objectToYAML(info)

@@ -203,11 +203,19 @@ func getListOptions(args map[string]any) metav1.ListOptions {
 		opts.FieldSelector = fs
 	}
 
+	if lim, ok := args["limit"].(float64); ok && lim >= 1 {
+		opts.Limit = int64(lim)
+	}
+
+	if c, ok := args["continue_token"].(string); ok && c != "" {
+		opts.Continue = c
+	}
+
 	return opts
 }
 
 // getDeleteOptions builds delete options from parameters
-func getDeleteOptions(args map[string]any) metav1.DeleteOptions {
+func getDeleteOptions(args map[string]any) (metav1.DeleteOptions, error) {
 	opts := metav1.DeleteOptions{}
 
 	if gp, ok := args["grace_period_seconds"].(float64); ok {
@@ -215,10 +223,15 @@ func getDeleteOptions(args map[string]any) metav1.DeleteOptions {
 		opts.GracePeriodSeconds = &gpInt
 	}
 
-	if pp, ok := args["propagation_policy"].(string); ok {
-		policy := metav1.DeletionPropagation(pp)
-		opts.PropagationPolicy = &policy
+	if pp, ok := args["propagation_policy"].(string); ok && pp != "" {
+		switch pp {
+		case "Orphan", "Background", "Foreground":
+			policy := metav1.DeletionPropagation(pp)
+			opts.PropagationPolicy = &policy
+		default:
+			return opts, fmt.Errorf("invalid propagation_policy %q: expected one of Orphan, Background, Foreground", pp)
+		}
 	}
 
-	return opts
+	return opts, nil
 }

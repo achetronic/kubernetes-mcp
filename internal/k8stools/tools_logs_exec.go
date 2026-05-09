@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"time"
 
@@ -32,6 +33,22 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/remotecommand"
 )
+
+// eventTime returns the most precise timestamp available for an event,
+// preferring lastTimestamp and falling back to eventTime / firstTimestamp.
+// Used to sort newest-first.
+func eventTime(e corev1.Event) time.Time {
+	if !e.LastTimestamp.IsZero() {
+		return e.LastTimestamp.Time
+	}
+	if !e.EventTime.IsZero() {
+		return e.EventTime.Time
+	}
+	if !e.FirstTimestamp.IsZero() {
+		return e.FirstTimestamp.Time
+	}
+	return e.CreationTimestamp.Time
+}
 
 func (m *Manager) registerGetLogs() {
 	tool := mcp.NewTool(m.toolName("get_logs"),
@@ -112,13 +129,21 @@ func (m *Manager) handleGetLogs(ctx context.Context, request mcp.CallToolRequest
 	}
 	defer stream.Close()
 
+	// Cap output to avoid loading megabytes of logs into the model context.
+	const logsMaxBytes = 1 << 20 // 1 MiB
+	limited := io.LimitReader(stream, logsMaxBytes+1)
+
 	var buf bytes.Buffer
-	_, err = io.Copy(&buf, stream)
-	if err != nil {
+	if _, err = io.Copy(&buf, limited); err != nil {
 		return errorResult(err), nil
 	}
 
-	return successResult(buf.String()), nil
+	output := buf.String()
+	if len(output) > logsMaxBytes {
+		output = output[:logsMaxBytes] + "\n[... output truncated at 1MiB; use 'tail_lines' or 'since_seconds' to scope the request]"
+	}
+
+	return successResult(output), nil
 }
 
 func (m *Manager) registerExecCommand() {
@@ -129,9 +154,12 @@ return its stdout and stderr.
 Constraints:
   - Non-interactive (no TTY, no stdin). Anything that requires user input
     or paging will block until timeout.
-  - Hard timeout of 30 seconds per call. Use long-running diagnostics in
-    smaller, scoped commands.
+  - Default timeout 30 seconds, configurable via 'timeout_seconds' up to 300.
+  - Combined stdout+stderr is capped at 1 MiB; output beyond that is
+    truncated with a clear marker.
   - The container must already exist (Pod in Running phase).
+  - When the command exits with a non-zero status, the result is reported
+    as an error (IsError=true) but the captured output is still included.
 
 Typical uses: 'cat /etc/config.yaml', 'env', 'ps aux', 'ls /var/log'.
 Avoid 'top', 'tail -f', 'sh' and similar interactive sessions.`),
@@ -140,6 +168,7 @@ Avoid 'top', 'tail -f', 'sh' and similar interactive sessions.`),
 		mcp.WithString("namespace", mcp.Description("Namespace where the Pod lives. Defaults to 'default' if empty.")),
 		mcp.WithString("container", mcp.Description("Name of the container inside the Pod. Required when the Pod has more than one container.")),
 		mcp.WithArray("command", mcp.Required(), mcp.Description("Command and arguments as an array of strings. Example: [\"ls\", \"-la\", \"/var/log\"]. Use shell features by wrapping in 'sh -c': [\"sh\", \"-c\", \"echo $HOSTNAME && date\"].")),
+		mcp.WithNumber("timeout_seconds", mcp.Description("Hard timeout in seconds for the command. Integer 1..300. Defaults to 30.")),
 	)
 	m.mcpServer.AddTool(tool, m.handleExecCommand)
 }
@@ -155,6 +184,20 @@ func (m *Manager) handleExecCommand(ctx context.Context, request mcp.CallToolReq
 	}
 	container, _ := args["container"].(string)
 	commandArg, _ := args["command"].([]any)
+	timeoutSecs, _ := args["timeout_seconds"].(float64)
+
+	// Clamp timeout to [1, 300]; default 30.
+	timeout := 30 * time.Second
+	if timeoutSecs > 0 {
+		ts := int(timeoutSecs)
+		if ts < 1 {
+			ts = 1
+		}
+		if ts > 300 {
+			ts = 300
+		}
+		timeout = time.Duration(ts) * time.Second
+	}
 
 	// Check authorization (real K8s resource: Pod)
 	if err := m.checkAuthorization(request, "exec_command", k8sContext, namespace, authorization.ResourceInfo{
@@ -206,28 +249,69 @@ func (m *Manager) handleExecCommand(ctx context.Context, request mcp.CallToolReq
 		return errorResult(err), nil
 	}
 
-	var stdout, stderr bytes.Buffer
+	const execMaxBytes = 1 << 20 // 1 MiB combined stdout+stderr cap
+	stdout := newCappedBuffer(execMaxBytes)
+	stderr := newCappedBuffer(execMaxBytes)
 
-	// Use a timeout context
-	execCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	execCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	err = exec.StreamWithContext(execCtx, remotecommand.StreamOptions{
-		Stdout: &stdout,
-		Stderr: &stderr,
+	streamErr := exec.StreamWithContext(execCtx, remotecommand.StreamOptions{
+		Stdout: stdout,
+		Stderr: stderr,
 	})
 
 	output := stdout.String()
 	if stderr.Len() > 0 {
 		output += "\n--- stderr ---\n" + stderr.String()
 	}
+	if stdout.truncated || stderr.truncated {
+		output += "\n[... output truncated at 1MiB combined]"
+	}
 
-	if err != nil {
-		return successResult(fmt.Sprintf("Command exited with error: %v\n\nOutput:\n%s", err, output)), nil
+	if streamErr != nil {
+		// Non-zero exit, timeout, or transport error: surface as error result
+		// while preserving whatever output was captured.
+		return &mcp.CallToolResult{
+			Content: []mcp.Content{
+				mcp.TextContent{
+					Type: "text",
+					Text: fmt.Sprintf("Command failed: %v\n\nOutput:\n%s", streamErr, output),
+				},
+			},
+			IsError: true,
+		}, nil
 	}
 
 	return successResult(output), nil
 }
+
+// cappedBuffer is a bytes.Buffer that stops accepting writes after `cap` bytes
+// have been written, marking itself as truncated.
+type cappedBuffer struct {
+	buf       bytes.Buffer
+	cap       int
+	truncated bool
+}
+
+func newCappedBuffer(cap int) *cappedBuffer { return &cappedBuffer{cap: cap} }
+
+func (c *cappedBuffer) Write(p []byte) (int, error) {
+	remaining := c.cap - c.buf.Len()
+	if remaining <= 0 {
+		c.truncated = true
+		return len(p), nil // pretend success to avoid breaking the stream
+	}
+	if len(p) > remaining {
+		c.truncated = true
+		_, _ = c.buf.Write(p[:remaining])
+		return len(p), nil
+	}
+	return c.buf.Write(p)
+}
+
+func (c *cappedBuffer) String() string { return c.buf.String() }
+func (c *cappedBuffer) Len() int       { return c.buf.Len() }
 
 func (m *Manager) registerListEvents() {
 	tool := mcp.NewTool(m.toolName("list_events"),
@@ -274,6 +358,31 @@ func (m *Manager) handleListEvents(ctx context.Context, request mcp.CallToolRequ
 		return errorResult(err), nil
 	}
 
+	// Translate a single-element 'types' filter into a server-side
+	// field_selector (more efficient than fetching everything and filtering
+	// in process). The K8s field_selector for events supports 'type=Normal'
+	// and 'type=Warning'.
+	var singleTypeFilter string
+	if len(eventTypes) == 1 {
+		if s, ok := eventTypes[0].(string); ok && (strings.EqualFold(s, "Normal") || strings.EqualFold(s, "Warning")) {
+			// canonicalize case
+			if strings.EqualFold(s, "Normal") {
+				singleTypeFilter = "Normal"
+			} else {
+				singleTypeFilter = "Warning"
+			}
+		}
+	}
+	if singleTypeFilter != "" {
+		clause := "type=" + singleTypeFilter
+		if fieldSelector == "" {
+			fieldSelector = clause
+		} else {
+			fieldSelector = fieldSelector + "," + clause
+		}
+		eventTypes = nil // already handled server-side
+	}
+
 	listOpts := metav1.ListOptions{
 		FieldSelector: fieldSelector,
 	}
@@ -289,7 +398,7 @@ func (m *Manager) handleListEvents(ctx context.Context, request mcp.CallToolRequ
 		return errorResult(err), nil
 	}
 
-	// Filter by event types if specified
+	// Client-side fallback for multi-element 'types' filter.
 	if len(eventTypes) > 0 {
 		var typeFilter []string
 		for _, t := range eventTypes {
@@ -309,6 +418,11 @@ func (m *Manager) handleListEvents(ctx context.Context, request mcp.CallToolRequ
 		}
 		events.Items = filteredItems
 	}
+
+	// Sort newest first by lastTimestamp (fallback to eventTime / firstTimestamp).
+	sort.Slice(events.Items, func(i, j int) bool {
+		return eventTime(events.Items[i]).After(eventTime(events.Items[j]))
+	})
 
 	yamlOutput, err := objectToYAML(events)
 	if err != nil {

@@ -122,6 +122,8 @@ form ('pods', 'deployments', 'ingresses', ...) is required, NOT the Kind.`),
 		mcp.WithString("namespace", mcp.Description("Namespace to scope the listing to. Empty string lists across ALL namespaces (subject to RBAC) and is ignored for cluster-scoped resources.")),
 		mcp.WithString("label_selector", mcp.Description("Kubernetes label selector. Comma separates AND clauses. Examples: 'app=nginx', 'app=api,env!=prod', 'tier in (frontend,backend)'.")),
 		mcp.WithString("field_selector", mcp.Description("Kubernetes field selector. Only a small set of fields is selectable per resource type (typically 'metadata.name', 'metadata.namespace', 'status.phase', 'spec.nodeName'). Examples: 'status.phase=Running', 'metadata.name=foo'.")),
+		mcp.WithNumber("limit", mcp.Description("Maximum number of items to return. Integer >= 1. When the cluster has more matching items, the response includes a `metadata.continue` token; pass it back in 'continue_token' to fetch the next page. Omit for no limit (use only on small clusters).")),
+		mcp.WithString("continue_token", mcp.Description("Continuation token returned by a previous call to fetch the next page. Pass alongside the same 'limit' and selectors.")),
 		mcp.WithArray("yq_expressions", mcp.Description("Optional yq expressions applied in order to filter or transform the YAML output. The output is a List object so use '.items[]' to iterate. Examples: '.items[].metadata.name' (just names), '.items | length' (count), '.items[] | select(.status.phase == \"Running\") | .metadata.name' (filter+project), '.items[] | {name: .metadata.name, ip: .status.podIP}' (reshape).")),
 	)
 	m.mcpServer.AddTool(tool, m.handleListResources)
@@ -252,18 +254,20 @@ func (m *Manager) handleDescribeResource(ctx context.Context, request mcp.CallTo
 	}
 
 	// Get related events. Resolve the Kind via the RESTMapper since events are
-	// indexed by involvedObject.kind, not by resource.
+	// indexed by involvedObject.kind, not by resource. For cluster-scoped
+	// resources we look across all namespaces (Node events live in 'default'
+	// in stock Kubernetes, but other distributions vary).
 	eventsOutput := ""
-	if namespace != "" {
-		kind, kindErr := m.resolveKindForGVR(client, gvr)
-		if kindErr == nil && kind != "" {
-			events, err := client.Clientset.CoreV1().Events(namespace).List(ctx, metav1.ListOptions{
-				FieldSelector: fmt.Sprintf("involvedObject.name=%s,involvedObject.kind=%s", name, kind),
-			})
-			if err == nil && len(events.Items) > 0 {
-				eventsYAML, _ := objectToYAML(events)
-				eventsOutput = "\n---\n# Related Events\n" + eventsYAML
-			}
+	kind, kindErr := m.resolveKindForGVR(client, gvr)
+	if kindErr == nil && kind != "" {
+		eventNS := namespace
+		// For cluster-scoped resources (no namespace), search all namespaces.
+		events, err := client.Clientset.CoreV1().Events(eventNS).List(ctx, metav1.ListOptions{
+			FieldSelector: fmt.Sprintf("involvedObject.name=%s,involvedObject.kind=%s", name, kind),
+		})
+		if err == nil && len(events.Items) > 0 {
+			eventsYAML, _ := objectToYAML(events)
+			eventsOutput = "\n---\n# Related Events\n" + eventsYAML
 		}
 	}
 

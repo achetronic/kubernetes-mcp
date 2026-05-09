@@ -111,6 +111,13 @@ func main() {
 	// 7. Wrap MCP server in a transport (stdio, HTTP, SSE)
 	switch appCtx.Config.Server.Transport.Type {
 	case "http":
+		// Loud warning if HTTP is enabled without an authorization layer.
+		// Without authz any caller that reaches /mcp can drive every tool,
+		// including destructive ones (delete_resource, exec_command, ...).
+		if authzEvaluator == nil {
+			appCtx.Logger.Warn("HTTP transport is enabled but no authorization policies are configured; ALL incoming requests will be allowed by default. Configure 'authorization.policies' before exposing this server.")
+		}
+
 		httpServer := server.NewStreamableHTTPServer(mcpServer,
 			server.WithHeartbeatInterval(30*time.Second),
 			server.WithStateLess(false))

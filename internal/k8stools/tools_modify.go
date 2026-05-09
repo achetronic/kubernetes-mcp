@@ -25,8 +25,10 @@ import (
 	"kubernetes-mcp/internal/authorization"
 
 	"github.com/mark3labs/mcp-go/mcp"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/yaml"
 )
@@ -62,13 +64,28 @@ func (m *Manager) handleApplyManifest(ctx context.Context, request mcp.CallToolR
 	manifest, _ := args["manifest"].(string)
 	namespaceOverride, _ := args["namespace"].(string)
 
+	// Reject multi-document YAML explicitly. sigs.k8s.io/yaml.Unmarshal would
+	// silently keep only the first document, which masks bugs in callers.
+	if isMultiDocumentYAML(manifest) {
+		return errorResult(fmt.Errorf("multi-document YAML is not supported; submit one document per call (separators '---' detected)")), nil
+	}
+
 	// Parse manifest
 	obj := &unstructured.Unstructured{}
 	if err := yaml.Unmarshal([]byte(manifest), &obj.Object); err != nil {
 		return errorResult(fmt.Errorf("failed to parse manifest: %w", err)), nil
 	}
+	if len(obj.Object) == 0 {
+		return errorResult(fmt.Errorf("manifest is empty")), nil
+	}
 
 	gvk := obj.GroupVersionKind()
+	if gvk.Kind == "" {
+		return errorResult(fmt.Errorf("manifest is missing 'kind'")), nil
+	}
+	if obj.GetName() == "" {
+		return errorResult(fmt.Errorf("manifest is missing 'metadata.name'")), nil
+	}
 
 	client, err := m.clientManager.GetClient(k8sContext)
 	if err != nil {
@@ -88,6 +105,7 @@ func (m *Manager) handleApplyManifest(ctx context.Context, request mcp.CallToolR
 	}
 	if !namespaced {
 		namespace = ""
+		obj.SetNamespace("")
 	}
 
 	// Check authorization
@@ -104,30 +122,119 @@ func (m *Manager) handleApplyManifest(ctx context.Context, request mcp.CallToolR
 		return errorResult(fmt.Errorf("namespace %s is not allowed in context %s", namespace, k8sContext)), nil
 	}
 
-	// Try to create, if exists then update
-	var result *unstructured.Unstructured
+	// Try to create. If the resource already exists, do a proper read-modify-
+	// write update: GET the live object, copy server-managed immutable fields
+	// (resourceVersion, clusterIP, ...), then Update.
+	resourceClient := client.DynamicClient.Resource(gvr)
+	var nsClient dynamicResource = resourceClient
 	if namespace != "" {
-		result, err = client.DynamicClient.Resource(gvr).Namespace(namespace).Create(ctx, obj, metav1.CreateOptions{})
-		if err != nil && strings.Contains(err.Error(), "already exists") {
-			result, err = client.DynamicClient.Resource(gvr).Namespace(namespace).Update(ctx, obj, metav1.UpdateOptions{})
-		}
-	} else {
-		result, err = client.DynamicClient.Resource(gvr).Create(ctx, obj, metav1.CreateOptions{})
-		if err != nil && strings.Contains(err.Error(), "already exists") {
-			result, err = client.DynamicClient.Resource(gvr).Update(ctx, obj, metav1.UpdateOptions{})
-		}
+		nsClient = resourceClient.Namespace(namespace)
 	}
 
+	created, err := nsClient.Create(ctx, obj, metav1.CreateOptions{})
+	if err == nil {
+		yamlOutput, _ := objectToYAML(created)
+		return successResult(fmt.Sprintf("Successfully created %s/%s in namespace %s\n\n%s", gvk.Kind, obj.GetName(), namespace, yamlOutput)), nil
+	}
+	if !apierrors.IsAlreadyExists(err) {
+		return errorResult(err), nil
+	}
+
+	// Already exists -> Update path. Need the live object for resourceVersion
+	// and to preserve server-set immutable fields.
+	live, getErr := nsClient.Get(ctx, obj.GetName(), metav1.GetOptions{})
+	if getErr != nil {
+		return errorResult(fmt.Errorf("resource exists but could not be fetched for update: %w", getErr)), nil
+	}
+
+	mergeImmutableFields(obj, live, gvk)
+	obj.SetResourceVersion(live.GetResourceVersion())
+
+	updated, err := nsClient.Update(ctx, obj, metav1.UpdateOptions{})
 	if err != nil {
 		return errorResult(err), nil
 	}
 
-	yamlOutput, err := objectToYAML(result)
-	if err != nil {
-		return errorResult(err), nil
-	}
+	yamlOutput, _ := objectToYAML(updated)
+	return successResult(fmt.Sprintf("Successfully updated %s/%s in namespace %s\n\n%s", gvk.Kind, obj.GetName(), namespace, yamlOutput)), nil
+}
 
-	return successResult(fmt.Sprintf("Successfully applied %s/%s in namespace %s\n\n%s", gvk.Kind, obj.GetName(), namespace, yamlOutput)), nil
+// dynamicResource is the minimal subset of dynamic.ResourceInterface we use,
+// allowing the same code path for namespaced and cluster-scoped resources.
+type dynamicResource interface {
+	Create(ctx context.Context, obj *unstructured.Unstructured, opts metav1.CreateOptions, subresources ...string) (*unstructured.Unstructured, error)
+	Update(ctx context.Context, obj *unstructured.Unstructured, opts metav1.UpdateOptions, subresources ...string) (*unstructured.Unstructured, error)
+	Get(ctx context.Context, name string, opts metav1.GetOptions, subresources ...string) (*unstructured.Unstructured, error)
+}
+
+// isMultiDocumentYAML reports whether the input contains more than one YAML
+// document by looking for a '---' separator on its own line.
+func isMultiDocumentYAML(s string) bool {
+	for _, line := range strings.Split(s, "\n") {
+		if strings.TrimSpace(line) == "---" {
+			// '---' at the very start is just a document marker, not a separator.
+			// A separator implies a *second* document follows, so we need a non-empty
+			// document already seen before it.
+			return hasNonEmptyContentBefore(s, line)
+		}
+	}
+	return false
+}
+
+// hasNonEmptyContentBefore reports whether there is any non-comment,
+// non-blank line before the given separator line in s.
+func hasNonEmptyContentBefore(s, sep string) bool {
+	for _, line := range strings.Split(s, "\n") {
+		if line == sep {
+			return false
+		}
+		t := strings.TrimSpace(line)
+		if t == "" || strings.HasPrefix(t, "#") || t == "---" {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// mergeImmutableFields copies server-managed immutable fields from the live
+// object into the desired object. Without this, the Update would either fail
+// (Conflict on missing resourceVersion) or wipe out server-assigned values
+// (Service clusterIP, PVC volumeName, ...).
+func mergeImmutableFields(desired, live *unstructured.Unstructured, gvk schema.GroupVersionKind) {
+	switch {
+	case gvk.Group == "" && gvk.Kind == "Service":
+		// clusterIP / clusterIPs are immutable once assigned.
+		preserveString(desired, live, "spec", "clusterIP")
+		preserveSlice(desired, live, "spec", "clusterIPs")
+		preserveSlice(desired, live, "spec", "ipFamilies")
+		preserveString(desired, live, "spec", "ipFamilyPolicy")
+	case gvk.Group == "" && gvk.Kind == "PersistentVolumeClaim":
+		preserveString(desired, live, "spec", "volumeName")
+		preserveString(desired, live, "spec", "volumeMode")
+	}
+}
+
+// preserveString copies a string field from live -> desired only if desired
+// does not already have one.
+func preserveString(desired, live *unstructured.Unstructured, fields ...string) {
+	if cur, found, _ := unstructured.NestedString(desired.Object, fields...); found && cur != "" {
+		return
+	}
+	if v, found, _ := unstructured.NestedString(live.Object, fields...); found {
+		_ = unstructured.SetNestedField(desired.Object, v, fields...)
+	}
+}
+
+// preserveSlice copies a string slice from live -> desired only if desired
+// does not already have one.
+func preserveSlice(desired, live *unstructured.Unstructured, fields ...string) {
+	if cur, found, _ := unstructured.NestedSlice(desired.Object, fields...); found && len(cur) > 0 {
+		return
+	}
+	if v, found, _ := unstructured.NestedSlice(live.Object, fields...); found {
+		_ = unstructured.SetNestedSlice(desired.Object, v, fields...)
+	}
 }
 
 func (m *Manager) registerPatchResource() {
@@ -200,6 +307,11 @@ func (m *Manager) handlePatchResource(ctx context.Context, request mcp.CallToolR
 		patchType = types.JSONPatchType
 	default:
 		return errorResult(fmt.Errorf("invalid patch type: %s", patchTypeStr)), nil
+	}
+
+	// Validate patch is non-empty (avoid panic in subsequent indexing).
+	if strings.TrimSpace(patchData) == "" {
+		return errorResult(fmt.Errorf("patch is empty")), nil
 	}
 
 	// Convert YAML patch to JSON if needed
@@ -287,7 +399,10 @@ func (m *Manager) handleDeleteResource(ctx context.Context, request mcp.CallTool
 		return errorResult(err), nil
 	}
 
-	deleteOpts := getDeleteOptions(args)
+	deleteOpts, err := getDeleteOptions(args)
+	if err != nil {
+		return errorResult(err), nil
+	}
 
 	if namespace != "" {
 		err = client.DynamicClient.Resource(gvr).Namespace(namespace).Delete(ctx, name, deleteOpts)
@@ -311,12 +426,20 @@ to confirm exactly which objects will be deleted. At least one selector
 ('label_selector' or 'field_selector') is REQUIRED to avoid accidentally
 wiping a whole namespace.
 
+Safety checks enforced by this tool:
+  - 'namespace' must be set unless 'all_namespaces=true' is passed
+    explicitly (this barrier prevents accidental cross-namespace deletes).
+  - The total number of matched resources is capped by the server's
+    'kubernetes.tools.bulk_operations.max_resources_per_operation' setting
+    (default 100); the call is rejected if the selector matches more.
+
 For a single named resource use 'delete_resource'.`),
 		mcp.WithString("context", mcp.Description("Kubernetes context to target. If empty, uses the currently active MCP context.")),
 		mcp.WithString("group", mcp.Description("API group. Empty string \"\" for the core API.")),
 		mcp.WithString("version", mcp.Required(), mcp.Description("API version, e.g. 'v1'.")),
 		mcp.WithString("resource", mcp.Required(), mcp.Description("Resource name in the API sense: lowercase plural ('pods', 'deployments'). NOT the Kind.")),
-		mcp.WithString("namespace", mcp.Description("Namespace to scope the deletion to. Empty deletes across ALL namespaces — extremely dangerous, double-check before doing this.")),
+		mcp.WithString("namespace", mcp.Description("Namespace to scope the deletion to. Required unless 'all_namespaces=true' is set.")),
+		mcp.WithBoolean("all_namespaces", mcp.Description("If true, deletion is applied across ALL namespaces. Required to opt in to cross-namespace deletes; mutually exclusive with 'namespace'.")),
 		mcp.WithString("label_selector", mcp.Description("Kubernetes label selector. Examples: 'app=nginx', 'temp=true', 'tier in (frontend,backend)'. Required if 'field_selector' is empty.")),
 		mcp.WithString("field_selector", mcp.Description("Kubernetes field selector. Example: 'status.phase=Failed'. Required if 'label_selector' is empty.")),
 		mcp.WithNumber("grace_period_seconds", mcp.Description("Seconds before forced termination. 0 = delete immediately. Omit to use the resource's default.")),
@@ -329,11 +452,20 @@ func (m *Manager) handleDeleteResources(ctx context.Context, request mcp.CallToo
 
 	k8sContext := m.getContextParam(args)
 	namespace, _ := args["namespace"].(string)
+	allNamespaces, _ := args["all_namespaces"].(bool)
 	labelSelector, _ := args["label_selector"].(string)
 	fieldSelector, _ := args["field_selector"].(string)
 	gvr := gvrFromArgs(args)
 	if err := validateGVR(gvr); err != nil {
 		return errorResult(err), nil
+	}
+
+	// Cross-namespace barrier.
+	if allNamespaces && namespace != "" {
+		return errorResult(fmt.Errorf("'namespace' and 'all_namespaces=true' are mutually exclusive")), nil
+	}
+	if !allNamespaces && namespace == "" {
+		return errorResult(fmt.Errorf("'namespace' is required unless 'all_namespaces=true' is passed explicitly")), nil
 	}
 
 	// Require at least one selector for safety
@@ -360,7 +492,33 @@ func (m *Manager) handleDeleteResources(ctx context.Context, request mcp.CallToo
 	}
 
 	listOpts := getListOptions(args)
-	deleteOpts := getDeleteOptions(args)
+	deleteOpts, err := getDeleteOptions(args)
+	if err != nil {
+		return errorResult(err), nil
+	}
+
+	// Pre-list to enforce the bulk-operations cap. Avoids "delete and pray".
+	maxBulk := m.config.Kubernetes.Tools.BulkOperations.MaxResourcesPerOperation
+	if maxBulk <= 0 {
+		maxBulk = 100
+	}
+
+	var preList *unstructured.UnstructuredList
+	if namespace != "" {
+		preList, err = client.DynamicClient.Resource(gvr).Namespace(namespace).List(ctx, listOpts)
+	} else {
+		preList, err = client.DynamicClient.Resource(gvr).List(ctx, listOpts)
+	}
+	if err != nil {
+		return errorResult(fmt.Errorf("could not pre-list resources before delete: %w", err)), nil
+	}
+	matched := len(preList.Items)
+	if matched == 0 {
+		return successResult(fmt.Sprintf("No %s matched the selector; nothing to delete", gvr.Resource)), nil
+	}
+	if matched > maxBulk {
+		return errorResult(fmt.Errorf("selector matched %d resources, which exceeds the configured cap of %d (kubernetes.tools.bulk_operations.max_resources_per_operation); refine the selector or raise the cap", matched, maxBulk)), nil
+	}
 
 	if namespace != "" {
 		err = client.DynamicClient.Resource(gvr).Namespace(namespace).DeleteCollection(ctx, deleteOpts, listOpts)
@@ -372,5 +530,9 @@ func (m *Manager) handleDeleteResources(ctx context.Context, request mcp.CallToo
 		return errorResult(err), nil
 	}
 
-	return successResult(fmt.Sprintf("Successfully deleted %s resources matching selector in namespace %s", gvr.Resource, namespace)), nil
+	scope := "namespace " + namespace
+	if allNamespaces {
+		scope = "all namespaces"
+	}
+	return successResult(fmt.Sprintf("Successfully deleted %d %s matching selector in %s", matched, gvr.Resource, scope)), nil
 }

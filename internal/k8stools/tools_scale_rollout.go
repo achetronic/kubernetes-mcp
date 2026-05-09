@@ -72,6 +72,12 @@ func (m *Manager) handleScaleResource(ctx context.Context, request mcp.CallToolR
 	if err := validateGVR(gvr); err != nil {
 		return errorResult(err), nil
 	}
+	if namespace == "" {
+		return errorResult(fmt.Errorf("namespace is required for %s", gvr.Resource)), nil
+	}
+	if replicas < 0 || replicas != float64(int64(replicas)) {
+		return errorResult(fmt.Errorf("replicas must be a non-negative integer, got %v", replicas)), nil
+	}
 
 	// Check authorization
 	if err := m.checkAuthorization(request, "scale_resource", k8sContext, namespace, authorization.ResourceInfo{
@@ -83,7 +89,7 @@ func (m *Manager) handleScaleResource(ctx context.Context, request mcp.CallToolR
 		return errorResult(err), nil
 	}
 
-	if namespace != "" && !m.clientManager.IsNamespaceAllowed(k8sContext, namespace) {
+	if !m.clientManager.IsNamespaceAllowed(k8sContext, namespace) {
 		return errorResult(fmt.Errorf("namespace %s is not allowed in context %s", namespace, k8sContext)), nil
 	}
 
@@ -154,6 +160,9 @@ func (m *Manager) handleGetRolloutStatus(ctx context.Context, request mcp.CallTo
 	if err := validateGVR(gvr); err != nil {
 		return errorResult(err), nil
 	}
+	if namespace == "" {
+		return errorResult(fmt.Errorf("namespace is required for %s", gvr.Resource)), nil
+	}
 
 	// Check authorization
 	if err := m.checkAuthorization(request, "get_rollout_status", k8sContext, namespace, authorization.ResourceInfo{
@@ -165,7 +174,7 @@ func (m *Manager) handleGetRolloutStatus(ctx context.Context, request mcp.CallTo
 		return errorResult(err), nil
 	}
 
-	if namespace != "" && !m.clientManager.IsNamespaceAllowed(k8sContext, namespace) {
+	if !m.clientManager.IsNamespaceAllowed(k8sContext, namespace) {
 		return errorResult(fmt.Errorf("namespace %s is not allowed in context %s", namespace, k8sContext)), nil
 	}
 
@@ -179,16 +188,48 @@ func (m *Manager) handleGetRolloutStatus(ctx context.Context, request mcp.CallTo
 		return errorResult(err), nil
 	}
 
-	// Extract relevant status information
+	statusText := formatRolloutStatus(obj, gvr, name)
+	return successResult(statusText), nil
+}
+
+// formatRolloutStatus renders a kind-aware rollout summary. Deployments,
+// StatefulSets and DaemonSets each expose a different set of status fields;
+// a one-size-fits-all reader (the previous implementation) returned 0s for
+// the kinds it did not match.
+func formatRolloutStatus(obj *unstructured.Unstructured, gvr schema.GroupVersionResource, name string) string {
 	status, _, _ := unstructured.NestedMap(obj.Object, "status")
 	spec, _, _ := unstructured.NestedMap(obj.Object, "spec")
-
-	desiredReplicas, _, _ := unstructured.NestedInt64(spec, "replicas")
-	readyReplicas, _, _ := unstructured.NestedInt64(status, "readyReplicas")
-	updatedReplicas, _, _ := unstructured.NestedInt64(status, "updatedReplicas")
-	availableReplicas, _, _ := unstructured.NestedInt64(status, "availableReplicas")
-	observedGeneration, _, _ := unstructured.NestedInt64(status, "observedGeneration")
 	generation := obj.GetGeneration()
+	observedGeneration, _, _ := unstructured.NestedInt64(status, "observedGeneration")
+
+	var (
+		desired, ready, updated, available int64
+	)
+
+	switch gvr.Resource {
+	case "daemonsets":
+		desired, _, _ = unstructured.NestedInt64(status, "desiredNumberScheduled")
+		ready, _, _ = unstructured.NestedInt64(status, "numberReady")
+		updated, _, _ = unstructured.NestedInt64(status, "updatedNumberScheduled")
+		available, _, _ = unstructured.NestedInt64(status, "numberAvailable")
+	case "statefulsets":
+		desired, _, _ = unstructured.NestedInt64(spec, "replicas")
+		ready, _, _ = unstructured.NestedInt64(status, "readyReplicas")
+		updated, _, _ = unstructured.NestedInt64(status, "updatedReplicas")
+		// StatefulSets do not report 'availableReplicas' in older versions; in
+		// recent versions they do (1.22+). Try and fall back to readyReplicas.
+		availableField, found, _ := unstructured.NestedInt64(status, "availableReplicas")
+		if found {
+			available = availableField
+		} else {
+			available = ready
+		}
+	default: // deployments and anything else with replicas-style status
+		desired, _, _ = unstructured.NestedInt64(spec, "replicas")
+		ready, _, _ = unstructured.NestedInt64(status, "readyReplicas")
+		updated, _, _ = unstructured.NestedInt64(status, "updatedReplicas")
+		available, _, _ = unstructured.NestedInt64(status, "availableReplicas")
+	}
 
 	statusText := fmt.Sprintf(`Rollout Status for %s/%s:
   Desired:    %d
@@ -198,16 +239,11 @@ func (m *Manager) handleGetRolloutStatus(ctx context.Context, request mcp.CallTo
   Generation: %d (observed: %d)
   Synced:     %v`,
 		gvr.Resource, name,
-		desiredReplicas,
-		readyReplicas,
-		updatedReplicas,
-		availableReplicas,
-		generation,
-		observedGeneration,
+		desired, ready, updated, available,
+		generation, observedGeneration,
 		generation == observedGeneration,
 	)
 
-	// Check conditions
 	conditions, found, _ := unstructured.NestedSlice(status, "conditions")
 	if found && len(conditions) > 0 {
 		statusText += "\n\nConditions:"
@@ -221,7 +257,7 @@ func (m *Manager) handleGetRolloutStatus(ctx context.Context, request mcp.CallTo
 		}
 	}
 
-	return successResult(statusText), nil
+	return statusText
 }
 
 func (m *Manager) registerRestartRollout() {
@@ -262,6 +298,12 @@ func (m *Manager) handleRestartRollout(ctx context.Context, request mcp.CallTool
 	if err := validateGVR(gvr); err != nil {
 		return errorResult(err), nil
 	}
+	if namespace == "" {
+		return errorResult(fmt.Errorf("namespace is required for %s", gvr.Resource)), nil
+	}
+	if gvr.Group != "apps" || !rolloutSupportedResource(gvr.Resource) {
+		return errorResult(fmt.Errorf("restart_rollout is only supported for apps/{deployments,statefulsets,daemonsets}; got %s/%s", gvr.Group, gvr.Resource)), nil
+	}
 
 	// Check authorization
 	if err := m.checkAuthorization(request, "restart_rollout", k8sContext, namespace, authorization.ResourceInfo{
@@ -273,7 +315,7 @@ func (m *Manager) handleRestartRollout(ctx context.Context, request mcp.CallTool
 		return errorResult(err), nil
 	}
 
-	if namespace != "" && !m.clientManager.IsNamespaceAllowed(k8sContext, namespace) {
+	if !m.clientManager.IsNamespaceAllowed(k8sContext, namespace) {
 		return errorResult(fmt.Errorf("namespace %s is not allowed in context %s", namespace, k8sContext)), nil
 	}
 
@@ -307,6 +349,16 @@ func (m *Manager) handleRestartRollout(ctx context.Context, request mcp.CallTool
 	}
 
 	return successResult(fmt.Sprintf("Successfully triggered restart for %s/%s", gvr.Resource, name)), nil
+}
+
+// rolloutSupportedResource reports whether a resource has a meaningful rollout
+// (deployments, statefulsets, daemonsets). Used to whitelist restart_rollout.
+func rolloutSupportedResource(resource string) bool {
+	switch resource {
+	case "deployments", "statefulsets", "daemonsets":
+		return true
+	}
+	return false
 }
 
 func (m *Manager) registerUndoRollout() {

@@ -80,6 +80,14 @@ func (m *Manager) handleCheckPermission(ctx context.Context, request mcp.CallToo
 	name, _ := args["name"].(string)
 	namespace, _ := args["namespace"].(string)
 
+	// Split 'pods/exec' into ('pods', 'exec') so the SAR addresses the
+	// subresource correctly (the API expects the two parts separately).
+	subresource := ""
+	if idx := strings.Index(resource, "/"); idx >= 0 {
+		subresource = resource[idx+1:]
+		resource = resource[:idx]
+	}
+
 	// Check authorization (real K8s resource: SelfSubjectAccessReview)
 	if err := m.checkAuthorization(request, "check_permission", k8sContext, namespace, authorization.ResourceInfo{
 		Group:    "authorization.k8s.io",
@@ -98,11 +106,12 @@ func (m *Manager) handleCheckPermission(ctx context.Context, request mcp.CallToo
 	review := &authv1.SelfSubjectAccessReview{
 		Spec: authv1.SelfSubjectAccessReviewSpec{
 			ResourceAttributes: &authv1.ResourceAttributes{
-				Verb:      verb,
-				Group:     group,
-				Resource:  resource,
-				Name:      name,
-				Namespace: namespace,
+				Verb:        verb,
+				Group:       group,
+				Resource:    resource,
+				Subresource: subresource,
+				Name:        name,
+				Namespace:   namespace,
 			},
 		},
 	}
@@ -116,19 +125,28 @@ func (m *Manager) handleCheckPermission(ctx context.Context, request mcp.CallToo
 	if result.Status.Allowed {
 		status = "allowed"
 	}
+	if result.Status.Denied {
+		status = "denied (explicit)"
+	}
 
 	output := fmt.Sprintf("Permission check: %s\n", status)
-	output += fmt.Sprintf("  Verb:      %s\n", verb)
-	output += fmt.Sprintf("  Group:     %s\n", group)
-	output += fmt.Sprintf("  Resource:  %s\n", resource)
+	output += fmt.Sprintf("  Verb:        %s\n", verb)
+	output += fmt.Sprintf("  Group:       %s\n", group)
+	output += fmt.Sprintf("  Resource:    %s\n", resource)
+	if subresource != "" {
+		output += fmt.Sprintf("  Subresource: %s\n", subresource)
+	}
 	if name != "" {
-		output += fmt.Sprintf("  Name:      %s\n", name)
+		output += fmt.Sprintf("  Name:        %s\n", name)
 	}
 	if namespace != "" {
-		output += fmt.Sprintf("  Namespace: %s\n", namespace)
+		output += fmt.Sprintf("  Namespace:   %s\n", namespace)
 	}
 	if result.Status.Reason != "" {
-		output += fmt.Sprintf("  Reason:    %s\n", result.Status.Reason)
+		output += fmt.Sprintf("  Reason:      %s\n", result.Status.Reason)
+	}
+	if result.Status.EvaluationError != "" {
+		output += fmt.Sprintf("  Eval error:  %s\n", result.Status.EvaluationError)
 	}
 
 	return successResult(output), nil
@@ -164,11 +182,13 @@ func (m *Manager) handleGetPodMetrics(ctx context.Context, request mcp.CallToolR
 	name, _ := args["name"].(string)
 	labelSelector, _ := args["label_selector"].(string)
 
-	// Check authorization (real K8s resource: PodMetrics)
+	// Check authorization (real K8s resource: PodMetrics, surfaced under
+	// metrics.k8s.io/v1beta1 with the standard 'pods' plural — same name
+	// 'kubectl top pod' targets).
 	if err := m.checkAuthorization(request, "get_pod_metrics", k8sContext, namespace, authorization.ResourceInfo{
 		Group:    "metrics.k8s.io",
 		Version:  "v1beta1",
-		Resource: "podmetrics",
+		Resource: "pods",
 		Name:     name,
 	}); err != nil {
 		return errorResult(err), nil
@@ -249,11 +269,13 @@ func (m *Manager) handleGetNodeMetrics(ctx context.Context, request mcp.CallTool
 	name, _ := args["name"].(string)
 	labelSelector, _ := args["label_selector"].(string)
 
-	// Check authorization (real K8s resource: NodeMetrics)
+	// Check authorization (real K8s resource: NodeMetrics, surfaced under
+	// metrics.k8s.io/v1beta1 with the standard 'nodes' plural — same name
+	// 'kubectl top node' targets).
 	if err := m.checkAuthorization(request, "get_node_metrics", k8sContext, "", authorization.ResourceInfo{
 		Group:    "metrics.k8s.io",
 		Version:  "v1beta1",
-		Resource: "nodemetrics",
+		Resource: "nodes",
 		Name:     name,
 	}); err != nil {
 		return errorResult(err), nil

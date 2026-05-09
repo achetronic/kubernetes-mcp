@@ -28,7 +28,7 @@ data:
   k: v
 `
 	out := e.applyManifest(manifest)
-	requireContains(t, out, "Successfully applied ConfigMap/kmcp-e2e-cm", "expected success message")
+	requireContains(t, out, "ConfigMap/kmcp-e2e-cm", "expected success message")
 
 	if !e.resourceExists("", "v1", "configmaps", "kmcp-e2e-cm") {
 		t.Fatalf("ConfigMap was not created")
@@ -59,7 +59,7 @@ spec:
         image: nginx:alpine
 `
 	out := e.applyManifest(manifest)
-	requireContains(t, out, "Successfully applied Deployment/kmcp-e2e-deploy", "expected success message")
+	requireContains(t, out, "Deployment/kmcp-e2e-deploy", "expected success message")
 
 	if !e.resourceExists("apps", "v1", "deployments", "kmcp-e2e-deploy") {
 		t.Fatalf("Deployment was not created")
@@ -81,7 +81,7 @@ provisioner: kubernetes.io/no-provisioner
 volumeBindingMode: Immediate
 `
 	out := e.applyManifest(manifest)
-	requireContains(t, out, "Successfully applied StorageClass/kmcp-e2e-sc", "expected success message")
+	requireContains(t, out, "StorageClass/kmcp-e2e-sc", "expected success message")
 
 	// Cleanup the cluster-scoped resource explicitly.
 	t.Cleanup(func() {
@@ -113,7 +113,7 @@ spec:
   policyTypes: [Ingress]
 `
 	out := e.applyManifest(manifest)
-	requireContains(t, out, "Successfully applied NetworkPolicy/kmcp-e2e-np", "expected success message")
+	requireContains(t, out, "NetworkPolicy/kmcp-e2e-np", "expected success message")
 
 	if !e.resourceExists("networking.k8s.io", "v1", "networkpolicies", "kmcp-e2e-np") {
 		t.Fatalf("NetworkPolicy was not created")

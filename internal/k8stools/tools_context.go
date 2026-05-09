@@ -124,9 +124,13 @@ func (m *Manager) registerSwitchContext() {
 		mcp.WithDescription(`Change the MCP default context (Kubernetes cluster) used by every other
 tool when its 'context' parameter is empty.
 
-Use sparingly: prefer passing 'context' explicitly to each tool call when
-you operate against several clusters in the same session. The switch is
-process-wide and affects subsequent calls from any client.`),
+WARNING: this changes process-wide state. In an HTTP deployment with several
+clients connected to the same MCP server, every other caller will start
+seeing tools default to the new context as soon as this returns. To avoid
+accidents prefer passing 'context' explicitly to every destructive tool
+('apply_manifest', 'delete_resource', 'delete_resources', 'patch_resource',
+'scale_resource', 'restart_rollout', 'undo_rollout', 'exec_command') instead
+of relying on the active context.`),
 		mcp.WithString("context_name", mcp.Required(), mcp.Description("Name of the MCP context to make active. Must match one of the names returned by 'list_contexts'.")),
 	)
 	m.mcpServer.AddTool(tool, m.handleSwitchContext)
